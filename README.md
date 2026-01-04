@@ -2,6 +2,8 @@
 
 A sophisticated multi-agent trading platform for Indian equities (NIFTY 100 stocks), built using the Agno framework.
 
+![hagrid-ai](./hagrid-ai.png)
+
 ## Overview
 
 Hagrid AI analyzes all NIFTY 100 stocks daily using 12 specialized AI agents to select 10-15 best trading opportunities with:
