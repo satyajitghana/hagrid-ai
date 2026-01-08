@@ -3,9 +3,11 @@ Rate limiting models for the Fyers SDK.
 
 Rate Limits:
 - Per second: 10 requests
-- Per minute: 200 requests  
+- Per minute: 200 requests
 - Per day: 100,000 requests
 """
+
+from __future__ import annotations
 
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -199,7 +201,7 @@ class RateLimitState(BaseModel):
 class DailyRateLimitRecord(BaseModel):
     """Record of daily API usage for persistence."""
     
-    date: date = Field(
+    record_date: date = Field(
         ...,
         description="Date of the record"
     )

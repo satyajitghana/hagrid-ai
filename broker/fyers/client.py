@@ -193,6 +193,66 @@ class FyersClient:
         logger.info("Successfully authenticated")
         return token_data
     
+    async def authenticate_with_callback_server(
+        self,
+        port: Optional[int] = None,
+        host: Optional[str] = None,
+        timeout: int = 300,
+    ) -> TokenData:
+        """
+        Authenticate automatically using a local HTTP callback server.
+        
+        This is the easiest authentication method - no manual copy-paste needed!
+        Opens browser, waits for OAuth redirect, and automatically captures credentials.
+        
+        IMPORTANT: Your redirect_uri must be registered in Fyers dashboard beforehand.
+        The server will use the exact host/port from your configured redirect_uri.
+        
+        Args:
+            port: Port for callback server (uses redirect_uri port if None)
+            host: Host address for callback server (uses redirect_uri host if None)
+            timeout: Max seconds to wait for callback (default: 300)
+            
+        Returns:
+            TokenData with access token
+            
+        Raises:
+            FyersAuthenticationError: If authentication fails or times out
+            RuntimeError: If the configured port is already in use
+            
+        Example:
+            ```python
+            # Step 1: Register redirect_uri in Fyers dashboard
+            # e.g., http://127.0.0.1:9000/
+            
+            # Step 2: Configure client with same redirect_uri
+            config = FyersConfig(
+                client_id="YOUR_CLIENT_ID",
+                secret_key="YOUR_SECRET",
+                redirect_uri="http://127.0.0.1:9000/"  # Must match Fyers dashboard
+            )
+            client = FyersClient(config)
+            
+            # Step 3: Authenticate automatically - browser opens, you login, done!
+            await client.authenticate_with_callback_server()
+            
+            # Now you can make API calls
+            quotes = await client.get_quotes(["NSE:SBIN-EQ"])
+            ```
+        """
+        token_data = await self._oauth.authenticate_with_callback_server(
+            port=port,
+            host=host,
+            timeout=timeout,
+        )
+        
+        # Set token in HTTP client
+        self._http_client.set_access_token(token_data.access_token)
+        self._is_authenticated = True
+        
+        logger.info("Successfully authenticated with callback server")
+        return token_data
+    
     async def authenticate_with_auth_code(self, auth_code: str) -> TokenData:
         """
         Authenticate using an authorization code directly.

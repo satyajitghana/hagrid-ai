@@ -59,7 +59,46 @@ client = create_client(
 
 ## Authentication
 
-### OAuth Flow
+### Automatic Authentication (Recommended)
+
+The easiest way to authenticate - no manual copy-paste required!
+
+```python
+# Step 1: Register redirect URI in Fyers dashboard
+# Go to: https://myapi.fyers.in/dashboard
+# Add redirect URI: http://127.0.0.1:9000/
+
+# Step 2: Configure client with the same redirect URI
+config = FyersConfig(
+    client_id="YOUR_CLIENT_ID",
+    secret_key="YOUR_SECRET_KEY",
+    redirect_uri="http://127.0.0.1:9000/",  # Must match dashboard
+)
+
+client = FyersClient(config)
+
+# Step 3: Authenticate automatically
+# Browser opens, you login, callback is captured automatically
+await client.authenticate_with_callback_server()
+
+# That's it! No copy-paste needed.
+```
+
+**How it works:**
+1. Starts a local HTTP server on the configured port
+2. Opens your browser to the Fyers login page
+3. After you login, Fyers redirects to your local server
+4. The server captures the auth code automatically
+5. Exchanges it for an access token
+
+**Requirements:**
+- The redirect URI must be registered in Fyers dashboard beforehand
+- The configured port must be available (not used by another app)
+- Supports localhost URLs only (127.0.0.1 or localhost)
+
+### Manual OAuth Flow
+
+For cases where automatic callback isn't possible:
 
 ```python
 # 1. Generate auth URL

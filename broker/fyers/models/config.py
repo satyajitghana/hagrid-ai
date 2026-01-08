@@ -73,13 +73,15 @@ class FyersConfig(BaseModel):
     
     def get_app_id_hash(self) -> str:
         """
-        Generate SHA-256 hash of client_id + secret_key.
+        Generate SHA-256 hash of client_id:secret_key.
         Required for token validation API.
+        
+        Note: Fyers requires the format to be 'client_id:secret_key' with colon separator.
         
         Returns:
             SHA-256 hash string
         """
-        combined = f"{self.client_id}{self.secret_key}"
+        combined = f"{self.client_id}:{self.secret_key}"
         return hashlib.sha256(combined.encode()).hexdigest()
     
     class Config:
