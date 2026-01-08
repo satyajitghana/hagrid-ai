@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "agno>=2.3.21",
     "fastapi[standard]>=0.128.0",
+    "fyers-apiv3>=3.1.7",
     "httpx>=0.28.1",
     "pandas>=2.3.3",
     "pydantic>=2.12.5",
