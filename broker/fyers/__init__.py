@@ -15,40 +15,51 @@ WebSocket Features:
 - Up to 5000 symbol subscriptions
 - Auto-reconnection support
 
-Example:
+Quick Start (Scripts):
     ```python
-    from broker.fyers import FyersClient, FyersConfig
+    from broker.fyers import create_client
+    import asyncio
     
-    config = FyersConfig(
-        client_id="YOUR_CLIENT_ID",
-        secret_key="YOUR_SECRET_KEY",
+    # Simple! Just create and it auto-authenticates
+    client = create_client(
+        client_id="TX4LY7JMLL-100",
+        secret_key="YOUR_SECRET",
+        token_file="fyers_token.json",  # Saves/loads token
     )
-    
-    client = FyersClient(config)
-    
-    # Generate auth URL
-    auth_url = client.generate_auth_url()
-    print(f"Visit: {auth_url}")
-    
-    # After user authenticates
-    await client.authenticate(redirect_url)
     
     # Make API calls
-    quotes = await client.get_quotes(["NSE:INFY-EQ"])
+    quotes = asyncio.run(client.get_quotes(["NSE:SBIN-EQ"]))
+    positions = asyncio.run(client.get_positions())
+    ```
+
+Quick Start (Jupyter Notebooks):
+    ```python
+    from broker.fyers import create_client_async
     
-    # WebSocket for real-time data
-    from broker.fyers import FyersDataWebSocket, FyersOrderWebSocket
-    
-    data_ws = FyersDataWebSocket(
-        access_token=client.access_token,
-        on_message=lambda msg: print(msg),
+    # One-liner for Jupyter! Auto-authenticates
+    client = await create_client_async(
+        client_id="TX4LY7JMLL-100",
+        secret_key="YOUR_SECRET",
+        token_file="fyers_token.json",
     )
-    await data_ws.connect()
-    await data_ws.subscribe(["NSE:SBIN-EQ"])
+    
+    # Ready to use with await
+    quotes = await client.get_quotes(["NSE:SBIN-EQ"])
+    positions = await client.get_positions()
+    ```
+
+Environment Variables:
+    ```python
+    # Set: FYERS_CLIENT_ID, FYERS_SECRET_KEY
+    from broker.fyers import create_client_from_env
+    import asyncio
+    
+    client = create_client_from_env()
+    quotes = asyncio.run(client.get_quotes(["NSE:SBIN-EQ"]))
     ```
 """
 
-from broker.fyers.client import FyersClient, create_client
+from broker.fyers.client import FyersClient, create_client, create_client_async, create_client_from_env
 from broker.fyers.auth.oauth import FyersOAuth, interactive_login
 from broker.fyers.auth.token_storage import (
     TokenStorage,
@@ -80,6 +91,7 @@ from broker.fyers.models.orders import (
 )
 from broker.fyers.models.responses import (
     ProfileResponse,
+    ProfileData,
     FundsResponse,
     HoldingsResponse,
     OrdersResponse,
@@ -155,6 +167,8 @@ __all__ = [
     # Main client
     "FyersClient",
     "create_client",
+    "create_client_async",
+    "create_client_from_env",
     
     # Authentication
     "FyersOAuth",
@@ -193,6 +207,7 @@ __all__ = [
     
     # Response Models
     "ProfileResponse",
+    "ProfileData",
     "FundsResponse",
     "HoldingsResponse",
     "OrdersResponse",

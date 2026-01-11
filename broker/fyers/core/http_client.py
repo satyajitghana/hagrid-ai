@@ -341,6 +341,25 @@ class HTTPClient:
             Response data
         """
         return await self.request("PUT", endpoint, json_data=json_data, **kwargs)
+
+    async def patch(
+        self,
+        endpoint: str,
+        json_data: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Make a PATCH request.
+        
+        Args:
+            endpoint: API endpoint
+            json_data: JSON body data
+            **kwargs: Additional arguments passed to request()
+            
+        Returns:
+            Response data
+        """
+        return await self.request("PATCH", endpoint, json_data=json_data, **kwargs)
     
     async def delete(
         self,

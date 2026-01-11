@@ -43,6 +43,21 @@ class TokenData(BaseModel):
         """Get the authorization header value."""
         return f"{self.access_token}"
     
+    def __str__(self) -> str:
+        """Safe string representation that doesn't expose tokens."""
+        return (
+            f"TokenData("
+            f"access_token='***REDACTED***', "
+            f"has_refresh_token={self.refresh_token is not None}, "
+            f"expired={self.is_expired()}, "
+            f"created_at={self.created_at.isoformat() if self.created_at else None}"
+            f")"
+        )
+    
+    def __repr__(self) -> str:
+        """Safe repr that doesn't expose tokens."""
+        return self.__str__()
+    
     class Config:
         """Pydantic model configuration."""
         json_encoders = {

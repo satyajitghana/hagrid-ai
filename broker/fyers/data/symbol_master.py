@@ -6,32 +6,21 @@ Provides functionality to download and query symbol master files.
 
 import csv
 import io
+import json
 from datetime import datetime, date
-from enum import IntEnum
 from pathlib import Path
-from typing import Optional, Dict, List, Any, Iterator
+from typing import Optional, Dict, List, Any, Iterator, Union
 from pydantic import BaseModel, Field
 
 import httpx
 
 from broker.fyers.core.logger import get_logger
+from broker.fyers.models.enums import Exchange, Segment
 
 logger = get_logger("fyers.symbol_master")
 
-
-class Exchange(IntEnum):
-    """Exchange codes."""
-    NSE = 10
-    MCX = 11
-    BSE = 12
-
-
-class Segment(IntEnum):
-    """Segment codes."""
-    CAPITAL_MARKET = 10
-    EQUITY_DERIVATIVES = 11
-    CURRENCY_DERIVATIVES = 12
-    COMMODITY = 20
+# Default cache directory for all Fyers SDK data
+DEFAULT_CACHE_DIR = Path.home() / ".cache" / "fyers"
 
 
 class ExchangeSegment:
@@ -119,12 +108,19 @@ class Symbol(BaseModel):
         return self.option_type in ["CE", "PE"]
     
     def is_future(self) -> bool:
-        """Check if this is a future."""
-        return self.expiry_date is not None and not self.is_option()
+        """Check if this is a future contract."""
+        # Futures are derivatives (segment 11, 12, 20) with expiry but not options
+        return (
+            self.segment in [Segment.EQUITY_DERIVATIVES, Segment.CURRENCY_DERIVATIVES, Segment.COMMODITY]
+            and self.expiry_date is not None
+            and not self.is_option()
+        )
     
     def is_equity(self) -> bool:
-        """Check if this is an equity stock."""
-        return self.segment == Segment.CAPITAL_MARKET and not self.is_option() and not self.is_future()
+        """Check if this is an equity stock (not derivative)."""
+        # Equities are in Capital Market segment and are not options
+        # Note: Some equities might have expiry_date (bonds, warrants) but they're still equities
+        return self.segment == Segment.CAPITAL_MARKET and not self.is_option()
     
     def get_expiry_date(self) -> Optional[date]:
         """Get expiry date as datetime.date object."""
@@ -160,21 +156,28 @@ class SymbolMaster:
         ```
     """
     
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, cache_dir: Optional[str] = None, enable_cache: bool = True):
         """
-        Initialize Symbol Master.
+        Initialize Symbol Master with automatic daily caching.
         
         Args:
-            cache_dir: Directory to cache downloaded files
+            cache_dir: Directory to cache downloaded files (default: ~/.cache/fyers)
+            enable_cache: Enable daily caching to avoid re-downloads (default: True)
         """
-        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+        self.enable_cache = enable_cache
         self._symbols: Dict[str, Symbol] = {}
         self._by_fytoken: Dict[str, Symbol] = {}
         self._by_isin: Dict[str, List[Symbol]] = {}
         self._by_underlying: Dict[str, List[Symbol]] = {}
         self._loaded_segments: set = set()
         
-        logger.info("Symbol Master initialized")
+        # Create cache directory if it doesn't exist
+        if self.enable_cache:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Symbol Master initialized with cache: {self.cache_dir}")
+        else:
+            logger.info("Symbol Master initialized (caching disabled)")
     
     async def download_csv(
         self,
@@ -228,29 +231,104 @@ class SymbolMaster:
             response.raise_for_status()
             return response.json()
     
+    def _get_cache_path(self, exchange_segment: str) -> Path:
+        """Get cache file path for a segment."""
+        today = date.today().isoformat()
+        return self.cache_dir / f"{exchange_segment}_{today}.json"
+    
+    def _is_cache_valid(self, exchange_segment: str) -> bool:
+        """Check if cached data exists and is from today."""
+        if not self.enable_cache:
+            return False
+        
+        cache_path = self._get_cache_path(exchange_segment)
+        if not cache_path.exists():
+            return False
+        
+        # Check if it's from today
+        today = date.today().isoformat()
+        return today in cache_path.name
+    
+    def _save_to_cache(self, exchange_segment: str, data: Dict[str, Any]) -> None:
+        """Save symbol data to cache."""
+        if not self.enable_cache:
+            return
+        
+        try:
+            cache_path = self._get_cache_path(exchange_segment)
+            with open(cache_path, 'w') as f:
+                json.dump(data, f)
+            logger.debug(f"Cached {exchange_segment} data to {cache_path}")
+        except Exception as e:
+            logger.warning(f"Failed to cache {exchange_segment}: {e}")
+    
+    def _load_from_cache(self, exchange_segment: str) -> Optional[Dict[str, Any]]:
+        """Load symbol data from cache."""
+        if not self.enable_cache:
+            return None
+        
+        try:
+            cache_path = self._get_cache_path(exchange_segment)
+            if cache_path.exists():
+                with open(cache_path, 'r') as f:
+                    data = json.load(f)
+                logger.info(f"Loaded {exchange_segment} from cache")
+                return data
+        except Exception as e:
+            logger.warning(f"Failed to load cache for {exchange_segment}: {e}")
+        
+        return None
+    
     async def load_segment(
         self,
         exchange_segment: str,
         use_json: bool = True,
+        force_download: bool = False,
     ) -> int:
         """
-        Load symbols for a specific exchange segment.
+        Load symbols for a specific exchange segment with daily caching.
+        
+        Symbol master is cached daily. If cache exists from today, it's loaded
+        instantly without downloading. Cache automatically expires next day.
         
         Args:
             exchange_segment: One of ExchangeSegment values
             use_json: Use JSON format (True) or CSV (False)
+            force_download: Force download even if cache exists
             
         Returns:
             Number of symbols loaded
         """
         if exchange_segment in self._loaded_segments:
-            logger.debug(f"Segment {exchange_segment} already loaded")
+            logger.debug(f"Segment {exchange_segment} already loaded in memory")
             return 0
         
         count = 0
         
+        # Try cache first (unless force_download)
+        if not force_download and self._is_cache_valid(exchange_segment):
+            cached_data = self._load_from_cache(exchange_segment)
+            if cached_data:
+                for ticker, symbol_data in cached_data.items():
+                    try:
+                        symbol = Symbol(**symbol_data)
+                        self._add_symbol(symbol)
+                        count += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to parse cached symbol {ticker}: {e}")
+                
+                self._loaded_segments.add(exchange_segment)
+                logger.info(f"Loaded {count} symbols from cache ({exchange_segment})")
+                return count
+        
+        # Download if no cache or force_download
         if use_json:
             data = await self.download_json(exchange_segment)
+            
+            # Save to cache
+            if self.enable_cache:
+                self._save_to_cache(exchange_segment, data)
+            
             for ticker, symbol_data in data.items():
                 try:
                     symbol = Symbol(**symbol_data)
@@ -263,7 +341,7 @@ class SymbolMaster:
             count = self._parse_csv(csv_content)
         
         self._loaded_segments.add(exchange_segment)
-        logger.info(f"Loaded {count} symbols from {exchange_segment}")
+        logger.info(f"Downloaded and loaded {count} symbols from {exchange_segment}")
         
         return count
     
@@ -353,6 +431,14 @@ class SymbolMaster:
         logger.info(f"Total symbols loaded: {total}")
         return total
     
+    def _ensure_data_loaded(self) -> None:
+        """Ensure symbol data is loaded before querying."""
+        if not self._symbols:
+            raise ValueError(
+                "No symbol data loaded. "
+                "Call 'await symbol_master.load_segment()' or 'await symbol_master.download_all()' first."
+            )
+    
     def get_symbol(self, ticker: str) -> Optional[Symbol]:
         """
         Get symbol by ticker.
@@ -362,7 +448,11 @@ class SymbolMaster:
             
         Returns:
             Symbol if found, None otherwise
+            
+        Raises:
+            ValueError: If no symbol data is loaded
         """
+        self._ensure_data_loaded()
         return self._symbols.get(ticker)
     
     def get_by_fytoken(self, fytoken: str) -> Optional[Symbol]:
@@ -374,48 +464,109 @@ class SymbolMaster:
             
         Returns:
             Symbol if found, None otherwise
+            
+        Raises:
+            ValueError: If no symbol data is loaded
         """
+        self._ensure_data_loaded()
         return self._by_fytoken.get(fytoken)
     
-    def get_by_isin(self, isin: str) -> List[Symbol]:
+    def get_by_isin(
+        self,
+        isin: str,
+        as_dataframe: bool = False,
+    ) -> Union[List[Symbol], "pd.DataFrame"]:
         """
         Get all symbols with the given ISIN.
         
         Args:
             isin: ISIN code
+            as_dataframe: Return as pandas DataFrame (default: False)
             
         Returns:
-            List of matching symbols
+            List of Symbol objects or DataFrame if as_dataframe=True
+            
+        Raises:
+            ValueError: If no symbol data is loaded
+            ImportError: If as_dataframe=True but pandas not installed
+            
+        Example:
+            ```python
+            # Get as list
+            symbols = sm.get_by_isin("INE002A01018")
+            
+            # Get as DataFrame
+            df = sm.get_by_isin("INE002A01018", as_dataframe=True)
+            ```
         """
-        return self._by_isin.get(isin, [])
+        self._ensure_data_loaded()
+        
+        symbols = self._by_isin.get(isin, [])
+        
+        if as_dataframe:
+            try:
+                import pandas as pd
+            except ImportError:
+                raise ImportError("pandas required for as_dataframe=True. Install: pip install pandas")
+            
+            if not symbols:
+                return pd.DataFrame()
+            
+            return pd.DataFrame([s.model_dump() for s in symbols])
+        
+        return symbols
     
     def search(
         self,
         query: str,
-        exchange: Optional[int] = None,
-        segment: Optional[int] = None,
+        exchange: Optional[Union[int, Exchange]] = None,
+        segment: Optional[Union[int, Segment]] = None,
         limit: int = 50,
-    ) -> List[Symbol]:
+        as_dataframe: bool = False,
+    ) -> Union[List[Symbol], "pd.DataFrame"]:
         """
         Search for symbols matching a query.
         
         Args:
             query: Search query (matches ticker, symbol name, etc.)
-            exchange: Filter by exchange
-            segment: Filter by segment
+            exchange: Filter by exchange (use Exchange enum)
+            segment: Filter by segment (use Segment enum)
             limit: Maximum results to return
+            as_dataframe: Return as pandas DataFrame (default: False)
             
         Returns:
-            List of matching symbols
+            List of Symbol objects or DataFrame if as_dataframe=True
+            
+        Raises:
+            ValueError: If no symbol data is loaded
+            ImportError: If as_dataframe=True but pandas not installed
+            
+        Example:
+            ```python
+            from broker.fyers.models.enums import Exchange, Segment
+            
+            # Search as list
+            results = sm.search("RELIANCE", exchange=Exchange.NSE)
+            
+            # Search as DataFrame
+            df = sm.search("RELIANCE", exchange=Exchange.NSE, as_dataframe=True)
+            print(df[['symbol_ticker', 'symbol_details']])
+            ```
         """
+        self._ensure_data_loaded()
+        
+        # Convert enums to int
+        exchange_val = int(exchange) if exchange is not None else None
+        segment_val = int(segment) if segment is not None else None
+        
         query_lower = query.lower()
         results = []
         
         for symbol in self._symbols.values():
             # Check filters
-            if exchange is not None and symbol.exchange != exchange:
+            if exchange_val is not None and symbol.exchange != exchange_val:
                 continue
-            if segment is not None and symbol.segment != segment:
+            if segment_val is not None and symbol.segment != segment_val:
                 continue
             
             # Match against various fields
@@ -429,23 +580,52 @@ class SymbolMaster:
                 if len(results) >= limit:
                     break
         
+        if as_dataframe:
+            try:
+                import pandas as pd
+            except ImportError:
+                raise ImportError("pandas required for as_dataframe=True. Install: pip install pandas")
+            
+            if not results:
+                return pd.DataFrame()
+            
+            return pd.DataFrame([s.model_dump() for s in results])
+        
         return results
     
     def get_options_chain(
         self,
         underlying: str,
         expiry_date: Optional[date] = None,
-    ) -> List[Symbol]:
+        as_dataframe: bool = False,
+    ) -> Union[List[Symbol], "pd.DataFrame"]:
         """
         Get options chain for an underlying symbol.
         
         Args:
             underlying: Underlying symbol name
             expiry_date: Filter by specific expiry date
+            as_dataframe: Return as pandas DataFrame (default: False)
             
         Returns:
-            List of option symbols
+            List of Symbol objects or DataFrame if as_dataframe=True
+            
+        Raises:
+            ValueError: If no symbol data is loaded
+            ImportError: If as_dataframe=True but pandas not installed
+            
+        Example:
+            ```python
+            # Get as list
+            options = sm.get_options_chain("NIFTY")
+            
+            # Get as DataFrame
+            df = sm.get_options_chain("NIFTY", as_dataframe=True)
+            print(df.groupby('strike_price')['option_type'].value_counts())
+            ```
         """
+        self._ensure_data_loaded()
+        
         options = []
         
         for symbol in self._by_underlying.get(underlying, []):
@@ -466,6 +646,22 @@ class SymbolMaster:
             s.option_type or "",
         ))
         
+        if as_dataframe:
+            try:
+                import pandas as pd
+            except ImportError:
+                raise ImportError("pandas required for as_dataframe=True. Install: pip install pandas")
+            
+            if not options:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame([o.model_dump() for o in options])
+            # Add parsed expiry date
+            df['expiry_date_parsed'] = df['expiry_date'].apply(
+                lambda x: datetime.fromtimestamp(int(x)).date() if x else None
+            )
+            return df
+        
         return options
     
     def get_futures(
@@ -482,7 +678,12 @@ class SymbolMaster:
             
         Returns:
             List of future symbols
+            
+        Raises:
+            ValueError: If no symbol data is loaded
         """
+        self._ensure_data_loaded()
+        
         futures = []
         
         for symbol in self._by_underlying.get(underlying, []):
@@ -524,23 +725,78 @@ class SymbolMaster:
         """Get all loaded symbol tickers."""
         return list(self._symbols.keys())
     
-    def get_equity_symbols(
+    def get_all_equities(
         self,
-        exchange: Optional[int] = None,
-    ) -> Iterator[Symbol]:
+        exchange: Optional[Union[int, Exchange]] = None,
+        as_dataframe: bool = False,
+    ) -> Union[List[Symbol], "pd.DataFrame"]:
         """
-        Iterate over equity symbols.
+        Get all equity symbols.
         
         Args:
-            exchange: Filter by exchange
+            exchange: Filter by exchange (use Exchange.NSE, Exchange.BSE, or Exchange.MCX)
+            as_dataframe: Return as pandas DataFrame (default: False)
+            
+        Returns:
+            List of Symbol objects or DataFrame if as_dataframe=True
+            
+        Raises:
+            ValueError: If no symbol data is loaded
+            ImportError: If as_dataframe=True but pandas not installed
+            
+        Example:
+            ```python
+            from broker.fyers.models.enums import Exchange
+            
+            sm = SymbolMaster()
+            await sm.load_segment("NSE_CM")
+            
+            # Get as list
+            nse_equities = sm.get_all_equities(exchange=Exchange.NSE)
+            print(f"Found {len(nse_equities)} NSE equities")
+            
+            # Get as DataFrame
+            df = sm.get_all_equities(exchange=Exchange.NSE, as_dataframe=True)
+            print(df[['symbol_ticker', 'symbol_details', 'previous_close']])
+            ```
+        """
+        self._ensure_data_loaded()
+        
+        equities = list(self.get_equity_symbols(exchange))
+        
+        if as_dataframe:
+            try:
+                import pandas as pd
+            except ImportError:
+                raise ImportError("pandas required for as_dataframe=True. Install: pip install pandas")
+            
+            if not equities:
+                return pd.DataFrame()
+            
+            return pd.DataFrame([e.model_dump() for e in equities])
+        
+        return equities
+    
+    def get_equity_symbols(
+        self,
+        exchange: Optional[Union[int, Exchange]] = None,
+    ) -> Iterator[Symbol]:
+        """
+        Iterate over equity symbols (memory efficient for large datasets).
+        
+        Args:
+            exchange: Filter by exchange (use Exchange enum)
             
         Yields:
             Equity symbols
         """
+        # Convert enum to int if needed
+        exchange_val = int(exchange) if exchange is not None else None
+        
         for symbol in self._symbols.values():
             if not symbol.is_equity():
                 continue
-            if exchange is not None and symbol.exchange != exchange:
+            if exchange_val is not None and symbol.exchange != exchange_val:
                 continue
             yield symbol
     
@@ -553,3 +809,201 @@ class SymbolMaster:
     def loaded_segments(self) -> List[str]:
         """Get list of loaded segments."""
         return list(self._loaded_segments)
+    
+    # ==================== DataFrame Methods ====================
+    
+    def to_dataframe(
+        self,
+        exchange: Optional[Union[int, Exchange]] = None,
+        segment: Optional[Union[int, Segment]] = None,
+    ) -> "pd.DataFrame":
+        """
+        Convert loaded symbols to pandas DataFrame.
+        
+        Args:
+            exchange: Filter by exchange (use Exchange enum)
+            segment: Filter by segment (use Segment enum)
+            
+        Returns:
+            DataFrame with all symbol data
+            
+        Example:
+            ```python
+            sm = SymbolMaster()
+            await sm.load_segment("NSE_CM")
+            
+            # Get all symbols as DataFrame
+            df = sm.to_dataframe()
+            
+            # Filter using enums (recommended!)
+            from broker.fyers.models.enums import Exchange, Segment
+            df_nse = sm.to_dataframe(exchange=Exchange.NSE)
+            df_nse_eq = sm.to_dataframe(exchange=Exchange.NSE, segment=Segment.CAPITAL_MARKET)
+            
+            # Explore data
+            print(df.head())
+            print(df[df['is_mtf_tradable'] == 1])
+            ```
+        """
+        self._ensure_data_loaded()
+        
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas is required for DataFrame operations. Install with: pip install pandas")
+        
+        # Convert enums to int
+        exchange_val = int(exchange) if exchange is not None else None
+        segment_val = int(segment) if segment is not None else None
+        
+        # Filter symbols
+        symbols = []
+        for symbol in self._symbols.values():
+            if exchange_val is not None and symbol.exchange != exchange_val:
+                continue
+            if segment_val is not None and symbol.segment != segment_val:
+                continue
+            symbols.append(symbol)
+        
+        if not symbols:
+            return pd.DataFrame()
+        
+        # Convert to DataFrame
+        df = pd.DataFrame([s.model_dump() for s in symbols])
+        
+        # Add helper columns with corrected logic
+        df['is_option'] = df['option_type'].isin(['CE', 'PE'])
+        df['is_future'] = (
+            df['segment'].isin([11, 12, 20]) &  # Derivatives segments
+            df['expiry_date'].notna() &
+            ~df['is_option']
+        )
+        df['is_equity'] = (df['segment'] == 10) & ~df['is_option']  # Capital Market, not options
+        
+        return df
+    
+    def search_dataframe(
+        self,
+        query: str,
+        exchange: Optional[int] = None,
+        segment: Optional[int] = None,
+        limit: int = 50,
+    ) -> "pd.DataFrame":
+        """
+        Search symbols and return results as DataFrame.
+        
+        Args:
+            query: Search query
+            exchange: Filter by exchange
+            segment: Filter by segment
+            limit: Maximum results
+            
+        Returns:
+            DataFrame with matching symbols
+            
+        Example:
+            ```python
+            # Search for RELIANCE
+            results = sm.search_dataframe("RELIANCE")
+            print(results[['symbol_ticker', 'symbol_details', 'ltp']])
+            ```
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas is required. Install with: pip install pandas")
+        
+        symbols = self.search(query, exchange, segment, limit)
+        
+        if not symbols:
+            return pd.DataFrame()
+        
+        return pd.DataFrame([s.model_dump() for s in symbols])
+    
+    def get_options_chain_dataframe(
+        self,
+        underlying: str,
+        expiry_date: Optional[date] = None,
+    ) -> "pd.DataFrame":
+        """
+        Get options chain as DataFrame.
+        
+        Args:
+            underlying: Underlying symbol
+            expiry_date: Filter by expiry
+            
+        Returns:
+            DataFrame with option chain data
+            
+        Example:
+            ```python
+            # Get NIFTY options
+            options_df = sm.get_options_chain_dataframe("NIFTY")
+            
+            # Analyze strikes
+            print(options_df.groupby('strike_price')['option_type'].value_counts())
+            
+            # Filter by expiry
+            from datetime import date
+            options_df = sm.get_options_chain_dataframe("NIFTY", date(2025, 1, 30))
+            ```
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas is required. Install with: pip install pandas")
+        
+        options = self.get_options_chain(underlying, expiry_date)
+        
+        if not options:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame([o.model_dump() for o in options])
+        
+        # Add expiry as proper date column
+        df['expiry_date_parsed'] = df['expiry_date'].apply(
+            lambda x: datetime.fromtimestamp(int(x)).date() if x else None
+        )
+        
+        return df
+    
+    def get_equity_symbols_dataframe(
+        self,
+        exchange: Optional[Union[int, Exchange]] = None,
+    ) -> "pd.DataFrame":
+        """
+        Get equity symbols as DataFrame.
+        
+        Args:
+            exchange: Filter by exchange (use Exchange enum)
+            
+        Returns:
+            DataFrame with equity symbols
+            
+        Example:
+            ```python
+            from broker.fyers.models.enums import Exchange
+            
+            # Get all NSE equities using enum (recommended!)
+            equities = sm.get_equity_symbols_dataframe(exchange=Exchange.NSE)
+            
+            # Find high-value stocks
+            high_value = equities[equities['previous_close'] > 1000]
+            
+            # MTF eligible stocks
+            mtf_stocks = equities[equities['is_mtf_tradable'] == 1]
+            ```
+        """
+        self._ensure_data_loaded()
+        
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas is required. Install with: pip install pandas")
+        
+        equities = list(self.get_equity_symbols(exchange))
+        
+        if not equities:
+            return pd.DataFrame()
+        
+        return pd.DataFrame([e.model_dump() for e in equities])

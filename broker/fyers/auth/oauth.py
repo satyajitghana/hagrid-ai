@@ -834,7 +834,7 @@ class FyersOAuth:
             token_data = await self.authenticate_with_redirect(redirect_url)
             
             print("\n✓ Authentication successful!")
-            print(f"Access token: {token_data.access_token[:30]}...")
+            logger.info("Access token obtained and saved")
             
             return token_data
             
@@ -905,6 +905,6 @@ async def interactive_login(
     token_data = await oauth.authenticate_with_redirect(redirect_url)
     
     print("\n✓ Authentication successful!")
-    print(f"Access token: {token_data.access_token[:30]}...")
+    logger.info("Access token obtained and saved")
     
     return token_data

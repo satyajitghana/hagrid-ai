@@ -4,57 +4,123 @@ A comprehensive Python SDK for interacting with the Fyers trading API, including
 
 ## Features
 
-- **OAuth Authentication**: Complete OAuth 2.0 flow with token management
+- **Smart Token Management**: Auto-loads and validates saved tokens - no explicit auth call needed if token exists
+- **OAuth Authentication**: Complete OAuth 2.0 flow with automatic browser-based login
+- **Token Validation**: Uses Profile API to verify tokens actually work (not just local expiry check)
 - **Rate Limiting**: Built-in rate limiting to comply with API limits
 - **WebSocket Support**: Real-time updates for orders, trades, positions, and market data
 - **Symbol Master**: Easy symbol lookup and management
+- **Environment Variables**: Support for loading credentials from env vars
 - **Comprehensive Logging**: Detailed logging for debugging
 
 ## Installation
 
 ```bash
-pip install fyers-apiv3
+# Install from source (development)
+pip install -e .
 ```
 
-## Quick Start
+## Quick Start (Recommended)
 
-### Basic Setup
-
-```python
-from broker.fyers import FyersClient, FyersConfig
-
-# Configure the client
-config = FyersConfig(
-    client_id="YOUR_CLIENT_ID",
-    secret_key="YOUR_SECRET_KEY",
-    redirect_uri="https://your-redirect-uri.com",
-)
-
-client = FyersClient(config)
-
-# Generate auth URL
-auth_url = client.generate_auth_url()
-print(f"Visit: {auth_url}")
-
-# After user authenticates (get redirect URL)
-redirect_url = "https://your-redirect-uri.com?auth_code=..."
-await client.authenticate(redirect_url)
-
-# Make API calls
-quotes = await client.get_quotes(["NSE:INFY-EQ"])
-print(quotes)
-```
-
-### Factory Function
+The simplest way to get started - just works if you have a valid token saved!
 
 ```python
 from broker.fyers import create_client
 
+# Create client with token file
 client = create_client(
+    client_id="TX4LY7JMLL-100",
+    secret_key="YOUR_SECRET",
+    token_file="fyers_token.json",  # Saves/loads token here
+)
+
+# Check if ready (token was loaded and validated with Profile API)
+if client.is_authenticated:
+    print(f"Welcome back, {client.user_name}!")
+    # Client is ready to use - no authenticate() call needed!
+else:
+    # No valid token, need to authenticate (opens browser automatically)
+    client.authenticate_sync()
+
+# Make API calls
+import asyncio
+quotes = asyncio.run(client.get_quotes(["NSE:SBIN-EQ"]))
+print(quotes)
+```
+
+### Using Environment Variables
+
+```bash
+# Set environment variables
+export FYERS_CLIENT_ID="TX4LY7JMLL-100"
+export FYERS_SECRET_KEY="YOUR_SECRET"
+export FYERS_TOKEN_FILE="fyers_token.json"  # Optional
+```
+
+```python
+from broker.fyers import create_client_from_env
+
+# Creates client from env vars - super clean!
+client = create_client_from_env()
+
+if client.is_authenticated:
+    print(f"Hello, {client.user_name}!")
+else:
+    client.authenticate_sync()
+```
+
+### Auto-Authenticate Option
+
+```python
+from broker.fyers import create_client
+
+# This will always result in an authenticated client
+client = create_client(
+    client_id="TX4LY7JMLL-100",
+    secret_key="YOUR_SECRET",
+    token_file="fyers_token.json",
+    auto_authenticate=True,  # Opens browser if no valid token
+)
+
+# Client is GUARANTEED to be authenticated here
+quotes = asyncio.run(client.get_quotes(["NSE:SBIN-EQ"]))
+```
+
+### Async Context Manager
+
+```python
+from broker.fyers import FyersClient, FyersConfig
+
+config = FyersConfig(
     client_id="YOUR_CLIENT_ID",
     secret_key="YOUR_SECRET_KEY",
-    token_file="tokens.json",  # Optional: persist tokens
+    token_file_path="fyers_token.json",
 )
+
+async with FyersClient(config) as client:
+    # Token auto-loaded and validated if available!
+    if client.is_authenticated:
+        print(f"Welcome, {client.user_name}!")
+        quotes = await client.get_quotes(["NSE:INFY-EQ"])
+    else:
+        await client.authenticate()  # Opens browser
+        quotes = await client.get_quotes(["NSE:INFY-EQ"])
+```
+
+### User Info Properties
+
+Once authenticated, you have easy access to user info:
+
+```python
+# After authentication
+print(f"Name: {client.user_name}")
+print(f"Fyers ID: {client.user_id}")
+print(f"Email: {client.user_email}")
+
+# Or get full profile
+if client.user_profile:
+    print(f"TOTP enabled: {client.user_profile.totp}")
+    print(f"MTF enabled: {client.user_profile.mtf_enabled}")
 ```
 
 ## Authentication

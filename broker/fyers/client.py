@@ -5,11 +5,42 @@ This is the main entry point for the Fyers SDK.
 """
 
 from typing import Any, Callable, Dict, List, Optional, Union
+import asyncio
 
 from broker.fyers.core.exceptions import (
     FyersException,
     FyersAuthenticationError,
     FyersTokenNotFoundError,
+)
+from broker.fyers.models.enums import (
+    Exchange,
+    Segment,
+    OrderSide,
+    OrderType,
+    OrderStatus,
+    PositionSide,
+)
+from broker.fyers.models.responses import (
+    ProfileResponse,
+    ProfileData,
+    FundsResponse,
+    HoldingsResponse,
+    OrdersResponse,
+    PositionsResponse,
+    TradesResponse,
+    HistoryResponse,
+    OrderPlacementResponse,
+    MultiOrderResponse,
+    OrderModifyResponse,
+    OrderCancelResponse,
+    LogoutResponse,
+    GenericResponse,
+    QuotesResponse,
+    MarketDepthResponse,
+    MarketStatusResponse,
+    MarginResponse,
+    GTTOrdersResponse,
+    OptionChainResponse,
 )
 from broker.fyers.websocket import (
     FyersOrderWebSocket,
@@ -53,33 +84,77 @@ class FyersClient:
     Main client for interacting with the Fyers API.
     
     Provides:
-    - OAuth authentication flow
+    - Smart OAuth authentication flow with token persistence
+    - Automatic token loading and refresh
     - Rate-limited API requests
-    - Token management
     - Comprehensive logging
+    - Both async and sync interfaces
     
-    Example usage:
+    Quick Start (Recommended):
+        ```python
+        from broker.fyers import create_client
+        
+        # One-liner setup with auto-authentication
+        client = create_client(
+            client_id="TX4LY7JMLL-100",
+            secret_key="YOUR_SECRET",
+            token_file="fyers_token.json",
+            auto_authenticate=True,
+        )
+        
+        # Make API calls
+        import asyncio
+        quotes = asyncio.run(client.get_quotes(["NSE:SBIN-EQ"]))
+        ```
+    
+    Standard Setup:
         ```python
         from broker.fyers import FyersClient, FyersConfig
         
         config = FyersConfig(
             client_id="TX4LY7JMLL-100",
-            secret_key="your_secret_key",
-            redirect_uri="https://your-redirect-uri.com",
+            secret_key="YOUR_SECRET",
+            redirect_uri="http://127.0.0.1:9000/",
+            token_file_path="fyers_token.json",
         )
         
         client = FyersClient(config)
         
-        # Generate auth URL for OAuth flow
-        auth_url = client.generate_auth_url()
-        print(f"Please visit: {auth_url}")
+        # Smart authenticate - uses saved token if available,
+        # opens browser for login if needed
+        await client.authenticate()
         
-        # After user authenticates, get the redirect URL
-        redirect_url = "https://your-redirect-uri.com?auth_code=..."
-        await client.authenticate(redirect_url)
+        # Now make API calls
+        quotes = await client.get_quotes(["NSE:SBIN-EQ"])
+        ```
+    
+    Authentication Scenarios:
+        ```python
+        # Scenario 1: Token already saved - instantly authenticated!
+        await client.authenticate()
         
-        # Now you can make API calls
-        quotes = await client.get_quotes(["NSE:INFY-EQ"])
+        # Scenario 2: Token expired, refresh it
+        await client.authenticate(refresh_pin="1234")
+        
+        # Scenario 3: No token, auto-opens browser for login
+        await client.authenticate()
+        
+        # Scenario 4: No token, manual OAuth flow
+        await client.authenticate(auto_browser=False)
+        # Then manually: await client.authenticate(redirect_url="...")
+        
+        # Sync version for non-async code
+        client.authenticate_sync()
+        ```
+    
+    Async Context Manager:
+        ```python
+        async with FyersClient(config) as client:
+            # Token loaded automatically if available
+            if client.is_authenticated:
+                quotes = await client.get_quotes(["NSE:SBIN-EQ"])
+            else:
+                await client.authenticate()
         ```
     """
     
@@ -137,6 +212,7 @@ class FyersClient:
         
         # State
         self._is_authenticated = False
+        self._user_profile: Optional[ProfileData] = None
         
         logger.info(f"FyersClient initialized for client_id: {config.client_id}")
     
@@ -168,11 +244,191 @@ class FyersClient:
     
     async def authenticate(
         self,
+        redirect_url: Optional[str] = None,
+        verify_state: bool = True,
+        refresh_pin: Optional[str] = None,
+        auto_browser: bool = True,
+    ) -> TokenData:
+        """
+        Smart authentication that tries multiple strategies.
+        
+        This is the main authentication method that handles all scenarios:
+        1. If a valid token exists in storage, uses it immediately
+        2. If token is expired but refresh_token exists, tries to refresh (requires PIN)
+        3. If redirect_url is provided, uses it for OAuth flow
+        4. If auto_browser=True, opens browser for OAuth flow automatically
+        5. Falls back to manual OAuth if nothing else works
+        
+        Args:
+            redirect_url: Optional redirect URL from OAuth callback.
+                         If not provided, will try saved token first.
+            verify_state: Whether to verify OAuth state parameter
+            refresh_pin: PIN for refreshing expired tokens (required for refresh)
+            auto_browser: If True and no token exists, automatically opens
+                         browser for OAuth flow (default: True)
+            
+        Returns:
+            TokenData with access token
+            
+        Raises:
+            FyersAuthenticationError: If all authentication strategies fail
+            
+        Example:
+            ```python
+            # Scenario 1: Token already saved (best case - just works!)
+            await client.authenticate()  # Uses saved token
+            
+            # Scenario 2: Token expired, refresh it
+            await client.authenticate(refresh_pin="1234")
+            
+            # Scenario 3: No token, automatic browser login
+            await client.authenticate()  # Opens browser automatically
+            
+            # Scenario 4: Manual OAuth flow
+            await client.authenticate(redirect_url="http://...?auth_code=...")
+            ```
+        """
+        # Strategy 1: Try to load existing valid token
+        if await self._try_load_saved_token():
+            logger.info("Using existing valid token from storage")
+            return await self._token_manager.get_token()
+        
+        # Strategy 2: Try to refresh expired token (if PIN provided)
+        if refresh_pin:
+            try:
+                token_data = await self._try_refresh_token(refresh_pin)
+                if token_data:
+                    logger.info("Successfully refreshed expired token")
+                    return token_data
+            except Exception as e:
+                logger.warning(f"Token refresh failed: {e}")
+        
+        # Strategy 3: Use provided redirect URL for OAuth
+        if redirect_url:
+            token_data = await self._oauth.authenticate_with_redirect(
+                redirect_url,
+                verify_state,
+            )
+            self._http_client.set_access_token(token_data.access_token)
+            self._is_authenticated = True
+            logger.info("Successfully authenticated via redirect URL")
+            return token_data
+        
+        # Strategy 4: Automatic browser-based OAuth
+        if auto_browser:
+            logger.info("No valid token found, starting browser-based OAuth flow")
+            return await self.authenticate_with_callback_server()
+        
+        # Strategy 5: Manual authentication required
+        raise FyersAuthenticationError(
+            "No valid token found and auto_browser=False. "
+            "Either provide a redirect_url, enable auto_browser, "
+            "or ensure token file contains a valid token."
+        )
+    
+    async def _try_load_saved_token(self, validate_with_api: bool = True) -> bool:
+        """
+        Try to load a saved token and set it as active.
+        
+        Optionally validates the token by making a Profile API call
+        to ensure it actually works (not just non-expired).
+        
+        Args:
+            validate_with_api: If True, validates token with Profile API call.
+                              This ensures the token is actually usable,
+                              not just that it hasn't expired locally.
+        
+        Returns:
+            True if valid token was loaded and set
+        """
+        try:
+            token_data = await self._token_manager.get_token()
+            
+            if not token_data:
+                logger.debug("No token found in storage")
+                return False
+            
+            # Check local expiry first (fast check)
+            if token_data.is_expired():
+                logger.debug("Token is expired (local check)")
+                return False
+            
+            # Set token temporarily to make validation call
+            self._http_client.set_access_token(token_data.access_token)
+            
+            # Validate with Profile API if requested
+            if validate_with_api:
+                try:
+                    profile_response = await self._http_client.get("/profile")
+                    
+                    # Parse the response
+                    parsed = ProfileResponse(**profile_response)
+                    
+                    if not parsed.is_success():
+                        logger.warning(f"Token validation failed: {parsed.message}")
+                        self._http_client.clear_access_token()
+                        return False
+                    
+                    # Cache user profile for convenience methods
+                    if parsed.data:
+                        self._user_profile = parsed.data
+                        logger.info(f"Token validated for user: {parsed.data.name} ({parsed.data.fy_id})")
+                    
+                except Exception as e:
+                    logger.warning(f"Token validation API call failed: {e}")
+                    self._http_client.clear_access_token()
+                    return False
+            
+            self._is_authenticated = True
+            return True
+            
+        except FyersTokenNotFoundError:
+            return False
+        except Exception as e:
+            logger.debug(f"Error loading saved token: {e}")
+            return False
+    
+    async def _try_refresh_token(self, pin: str) -> Optional[TokenData]:
+        """
+        Try to refresh an expired token.
+        
+        Args:
+            pin: User's PIN for refresh
+            
+        Returns:
+            New TokenData if refresh successful, None otherwise
+        """
+        try:
+            # Load token even if expired to get refresh_token
+            token = await self._token_storage.load_token()
+            
+            if not token or not token.refresh_token:
+                logger.debug("No refresh token available")
+                return None
+            
+            token_data = await self._oauth.refresh_access_token(
+                token.refresh_token,
+                pin,
+            )
+            
+            self._http_client.set_access_token(token_data.access_token)
+            self._is_authenticated = True
+            
+            return token_data
+            
+        except Exception as e:
+            logger.warning(f"Token refresh failed: {e}")
+            return None
+    
+    async def authenticate_with_redirect(
+        self,
         redirect_url: str,
         verify_state: bool = True,
     ) -> TokenData:
         """
-        Complete authentication using the redirect URL.
+        Complete authentication using the redirect URL directly.
+        
+        This is a lower-level method. Most users should use authenticate() instead.
         
         Args:
             redirect_url: Full redirect URL from OAuth callback
@@ -316,22 +572,45 @@ class FyersClient:
         """
         Load and validate a previously saved token.
         
+        This is automatically called when using the async context manager.
+        Most users should use authenticate() which handles this automatically.
+        
         Returns:
             True if valid token was loaded
         """
-        try:
-            token_data = await self._token_manager.get_token()
+        return await self._try_load_saved_token()
+    
+    async def ensure_authenticated(
+        self,
+        refresh_pin: Optional[str] = None,
+        auto_browser: bool = True,
+    ) -> TokenData:
+        """
+        Ensure the client is authenticated, loading or refreshing token as needed.
+        
+        Convenience method that calls authenticate() with sensible defaults.
+        This is the recommended way to ensure authentication in scripts.
+        
+        Args:
+            refresh_pin: Optional PIN for token refresh
+            auto_browser: Whether to auto-open browser if no token exists
             
-            if token_data and not token_data.is_expired():
-                self._http_client.set_access_token(token_data.access_token)
-                self._is_authenticated = True
-                logger.info("Loaded saved token")
-                return True
+        Returns:
+            TokenData with access token
             
-            return False
+        Example:
+            ```python
+            # One-liner to ensure authentication
+            token = await client.ensure_authenticated()
             
-        except FyersTokenNotFoundError:
-            return False
+            # With refresh capability
+            token = await client.ensure_authenticated(refresh_pin="1234")
+            ```
+        """
+        return await self.authenticate(
+            refresh_pin=refresh_pin,
+            auto_browser=auto_browser,
+        )
     
     async def logout(self) -> None:
         """Clear authentication and stored tokens."""
@@ -349,9 +628,61 @@ class FyersClient:
         """Get the current token data."""
         return await self._oauth.get_token()
     
+    # ==================== User Info Properties ====================
+    
+    @property
+    def user_profile(self) -> Optional[ProfileData]:
+        """
+        Get the cached user profile data.
+        
+        This is populated automatically when:
+        - Token is validated during authentication
+        - get_profile_typed() is called
+        
+        Returns:
+            ProfileData if available, None otherwise
+            
+        Example:
+            ```python
+            if client.user_profile:
+                print(f"Hello, {client.user_profile.name}!")
+            ```
+        """
+        return self._user_profile
+    
+    @property
+    def user_name(self) -> Optional[str]:
+        """
+        Get the authenticated user's name.
+        
+        Returns:
+            User's name if authenticated and profile loaded, None otherwise
+        """
+        return self._user_profile.name if self._user_profile else None
+    
+    @property
+    def user_id(self) -> Optional[str]:
+        """
+        Get the authenticated user's Fyers ID (fy_id).
+        
+        Returns:
+            Fyers ID if authenticated and profile loaded, None otherwise
+        """
+        return self._user_profile.fy_id if self._user_profile else None
+    
+    @property
+    def user_email(self) -> Optional[str]:
+        """
+        Get the authenticated user's email.
+        
+        Returns:
+            Email if authenticated and profile loaded, None otherwise
+        """
+        return self._user_profile.email_id if self._user_profile else None
+    
     # ==================== Market Data APIs ====================
     
-    async def get_quotes(self, symbols: List[str]) -> Dict[str, Any]:
+    async def get_quotes(self, symbols: List[str]) -> QuotesResponse:
         """
         Get full market quotes for symbols.
         
@@ -366,23 +697,24 @@ class FyersClient:
                 Maximum 50 symbols per request.
             
         Returns:
-            Quote data from API
+            QuotesResponse object
         """
         self._ensure_authenticated()
         
         # Use data API endpoint for quotes
         params = {"symbols": ",".join(symbols)}
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/quotes",
             params=params,
             base_url="https://api-t1.fyers.in/data",
         )
+        return QuotesResponse(**response)
     
     async def get_market_depth(
         self,
         symbol: str,
         ohlcv_flag: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> MarketDepthResponse:
         """
         Get complete market depth for a symbol.
         
@@ -394,7 +726,7 @@ class FyersClient:
             ohlcv_flag: Include OHLCV data (1=yes, 0=no)
             
         Returns:
-            Market depth data including:
+            MarketDepthResponse object with market depth data including:
             - totalbuyqty, totalsellqty
             - bids: [{price, volume, ord}]
             - ask: [{price, volume, ord}]
@@ -407,11 +739,12 @@ class FyersClient:
         self._ensure_authenticated()
         
         params = {"symbol": symbol, "ohlcv_flag": ohlcv_flag}
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/depth",
             params=params,
             base_url="https://api-t1.fyers.in/data",
         )
+        return MarketDepthResponse(**response)
     
     async def get_history(
         self,
@@ -422,7 +755,7 @@ class FyersClient:
         range_to: str,
         cont_flag: int = 0,
         oi_flag: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> HistoryResponse:
         """
         Get historical candle data.
         
@@ -448,11 +781,26 @@ class FyersClient:
             oi_flag: Set to 1 to include open interest in candle data
             
         Returns:
-            Historical candle data:
-            {
-                "s": "ok",
-                "candles": [[epoch, open, high, low, close, volume], ...]
-            }
+            HistoryResponse object (use .dataframe property for DataFrame)
+            
+        Example:
+            ```python
+            # Get typed response
+            history = await client.get_history(
+                symbol="NSE:SBIN-EQ",
+                resolution="5",
+                date_format=1,
+                range_from="2024-01-01",
+                range_to="2024-01-31",
+            )
+            
+            # Use raw data
+            print(f"Got {len(history.candles)} candles")
+            
+            # Or convert to DataFrame
+            df = history.dataframe
+            print(df[['datetime', 'open', 'high', 'low', 'close']])
+            ```
         """
         self._ensure_authenticated()
         
@@ -468,18 +816,20 @@ class FyersClient:
         if oi_flag:
             params["oi_flag"] = oi_flag
         
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/history",
             params=params,
             base_url="https://api-t1.fyers.in/data",
         )
+        
+        return HistoryResponse(**response)
     
     async def get_option_chain(
         self,
         symbol: str,
         strike_count: int = 10,
         timestamp: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> OptionChainResponse:
         """
         Get option chain data for a symbol.
         
@@ -493,15 +843,20 @@ class FyersClient:
             timestamp: Optional timestamp for historical option chain
             
         Returns:
-            Option chain data including:
-            - callOi, putOi: Total OI for calls/puts
-            - expiryData: Available expiry dates
-            - indiavixData: India VIX data
-            - optionsChain: List of option contracts with:
-                - symbol, fyToken, strike_price, option_type
-                - ltp, ltpch, ltpchp
-                - oi, oich, oichp, prev_oi
-                - volume, bid, ask
+            OptionChainResponse object (use .dataframe property for DataFrame)
+            
+        Example:
+            ```python
+            # Get typed response
+            oc = await client.get_option_chain("NSE:NIFTY50-INDEX", strike_count=5)
+            
+            # Use response methods
+            print(f"Call OI: {oc.get_call_oi()}, Put OI: {oc.get_put_oi()}")
+            
+            # Convert to DataFrame when needed
+            df = oc.dataframe
+            print(df[['symbol', 'strike_price', 'option_type', 'ltp', 'oi']])
+            ```
         """
         self._ensure_authenticated()
         
@@ -513,15 +868,17 @@ class FyersClient:
         if timestamp:
             params["timestamp"] = timestamp
         
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/options-chain-v3",
             params=params,
             base_url="https://api-t1.fyers.in/data",
         )
+        
+        return OptionChainResponse(**response)
     
     # ==================== Order APIs ====================
     
-    async def place_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def place_order(self, order_data: Dict[str, Any]) -> OrderPlacementResponse:
         """
         Place a single order.
         
@@ -529,32 +886,37 @@ class FyersClient:
             order_data: Order parameters
             
         Returns:
-            Order response
+            OrderPlacementResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.post("/orders/sync", json_data=order_data)
+        response = await self._http_client.post("/orders/sync", json_data=order_data)
+        return OrderPlacementResponse(**response)
     
     async def place_multi_order(
         self,
         orders: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> MultiOrderResponse:
         """
-        Place multiple orders.
+        Place multiple orders (Basket Order).
         
         Args:
             orders: List of order data dictionaries
             
         Returns:
-            Multi-order response
+            MultiOrderResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.post("/orders/multi", json_data=orders)
+        response = await self._http_client.post("/multi-order/sync", json_data=orders)
+        return MultiOrderResponse(**response)
+    
+    # Alias for compatibility with official SDK naming
+    place_basket_orders = place_multi_order
     
     async def modify_order(
         self,
         order_id: str,
         modifications: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> OrderModifyResponse:
         """
         Modify an existing order.
         
@@ -563,14 +925,15 @@ class FyersClient:
             modifications: Modifications to apply
             
         Returns:
-            Modification response
+            OrderModifyResponse object
         """
         self._ensure_authenticated()
         
         data = {"id": order_id, **modifications}
-        return await self._http_client.put("/orders/sync", json_data=data)
+        response = await self._http_client.patch("/orders/sync", json_data=data)
+        return OrderModifyResponse(**response)
     
-    async def cancel_order(self, order_id: str) -> Dict[str, Any]:
+    async def cancel_order(self, order_id: str) -> OrderCancelResponse:
         """
         Cancel an order.
         
@@ -578,24 +941,26 @@ class FyersClient:
             order_id: Order ID to cancel
             
         Returns:
-            Cancellation response
+            OrderCancelResponse object
         """
         self._ensure_authenticated()
         
         data = {"id": order_id}
-        return await self._http_client.delete("/orders/sync", json_data=data)
+        response = await self._http_client.delete("/orders/sync", json_data=data)
+        return OrderCancelResponse(**response)
     
-    async def get_orders(self) -> Dict[str, Any]:
+    async def get_orders(self) -> OrdersResponse:
         """
         Get all orders for the day.
         
         Returns:
-            Orders list
+            OrdersResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/orders")
+        response = await self._http_client.get("/orders")
+        return OrdersResponse(**response)
     
-    async def get_order_by_id(self, order_id: str) -> Dict[str, Any]:
+    async def get_order_by_id(self, order_id: str) -> OrdersResponse:
         """
         Get details for a specific order.
         
@@ -603,27 +968,30 @@ class FyersClient:
             order_id: Order ID
             
         Returns:
-            Order details
+            OrdersResponse object with order details
         """
         self._ensure_authenticated()
-        return await self._http_client.get(f"/orders/{order_id}")
+        # API uses query parameter, not path parameter
+        response = await self._http_client.get("/orders", params={"id": order_id})
+        return OrdersResponse(**response)
     
     # ==================== Position APIs ====================
     
-    async def get_positions(self) -> Dict[str, Any]:
+    async def get_positions(self) -> PositionsResponse:
         """
         Get all positions.
         
         Returns:
-            Positions data
+            PositionsResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/positions")
+        response = await self._http_client.get("/positions")
+        return PositionsResponse(**response)
     
     async def exit_position(
         self,
         position_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> GenericResponse:
         """
         Exit position(s).
         
@@ -631,7 +999,7 @@ class FyersClient:
             position_id: Specific position to exit (None = exit all)
             
         Returns:
-            Exit response
+            GenericResponse object
         """
         self._ensure_authenticated()
         
@@ -640,12 +1008,13 @@ class FyersClient:
         else:
             data = {}
             
-        return await self._http_client.delete("/positions", json_data=data)
+        response = await self._http_client.delete("/positions", json_data=data)
+        return GenericResponse(**response)
     
     async def convert_position(
         self,
         conversion_data: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> GenericResponse:
         """
         Convert position from one product to another.
         
@@ -653,56 +1022,77 @@ class FyersClient:
             conversion_data: Conversion parameters
             
         Returns:
-            Conversion response
+            GenericResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.put("/positions", json_data=conversion_data)
+        response = await self._http_client.post("/positions", json_data=conversion_data)
+        return GenericResponse(**response)
     
     # ==================== Portfolio APIs ====================
     
-    async def get_holdings(self) -> Dict[str, Any]:
+    async def get_holdings(self) -> HoldingsResponse:
         """
         Get portfolio holdings.
         
         Returns:
-            Holdings data
+            HoldingsResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/holdings")
+        response = await self._http_client.get("/holdings")
+        return HoldingsResponse(**response)
     
-    async def get_funds(self) -> Dict[str, Any]:
+    async def get_funds(self) -> FundsResponse:
         """
         Get available funds.
         
         Returns:
-            Funds data
+            FundsResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/funds")
+        response = await self._http_client.get("/funds")
+        return FundsResponse(**response)
     
     # ==================== User Profile APIs ====================
     
-    async def get_profile(self) -> Dict[str, Any]:
+    async def get_profile(self) -> ProfileResponse:
         """
         Get user profile.
         
         Returns:
-            Profile data
+            ProfileResponse with user profile data
+            
+        Example:
+            ```python
+            profile = await client.get_profile()
+            if profile.is_success():
+                print(f"Name: {profile.data.name}")
+                print(f"Fyers ID: {profile.data.fy_id}")
+                print(f"Email: {profile.data.email_id}")
+            ```
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/profile")
+        
+        response = await self._http_client.get("/profile")
+        parsed = ProfileResponse(**response)
+        
+        # Cache profile data
+        if parsed.is_success() and parsed.data:
+            self._user_profile = parsed.data
+        
+        return parsed
     
-    async def get_tradebook(self) -> Dict[str, Any]:
+    async def get_tradebook(self) -> TradesResponse:
         """
         Get trade book for the day.
         
         Returns:
-            Trade book data
+            TradesResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/tradebook")
+        response = await self._http_client.get("/tradebook")
+        return TradesResponse(**response)
     
-    async def get_tradebook_by_tag(self, order_tag: str) -> Dict[str, Any]:
+    async def get_tradebook_by_tag(self, order_tag: str) -> TradesResponse:
         """
         Get trade book filtered by order tag.
         
@@ -713,12 +1103,13 @@ class FyersClient:
             Filtered trade book data
         """
         self._ensure_authenticated()
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/tradebook",
             params={"order_tag": order_tag}
         )
+        return TradesResponse(**response)
     
-    async def get_orders_by_tag(self, order_tag: str) -> Dict[str, Any]:
+    async def get_orders_by_tag(self, order_tag: str) -> OrdersResponse:
         """
         Get orders filtered by order tag.
         
@@ -729,12 +1120,13 @@ class FyersClient:
             Filtered orders list
         """
         self._ensure_authenticated()
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/orders",
             params={"order_tag": order_tag}
         )
+        return OrdersResponse(**response)
     
-    async def get_order_by_id_filtered(self, order_id: str) -> Dict[str, Any]:
+    async def get_order_by_id_filtered(self, order_id: str) -> OrdersResponse:
         """
         Get order details by order ID using query param.
         
@@ -745,10 +1137,11 @@ class FyersClient:
             Order details
         """
         self._ensure_authenticated()
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/orders",
             params={"id": order_id}
         )
+        return OrdersResponse(**response)
     
     # ==================== Multi-Leg Orders ====================
     
@@ -760,7 +1153,7 @@ class FyersClient:
         validity: str = "IOC",
         offline_order: bool = False,
         order_tag: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> OrderPlacementResponse:
         """
         Place a multi-leg order (2L or 3L).
         
@@ -774,7 +1167,7 @@ class FyersClient:
             order_tag: Optional order tag
             
         Returns:
-            Order placement response
+            OrderPlacementResponse object
         """
         self._ensure_authenticated()
         
@@ -789,11 +1182,12 @@ class FyersClient:
         if order_tag:
             data["orderTag"] = order_tag
         
-        return await self._http_client.post("/orders/multileg", json_data=data)
+        response = await self._http_client.post("/multileg/orders/sync", json_data=data)
+        return OrderPlacementResponse(**response)
     
     # ==================== Cancel Multiple Orders ====================
     
-    async def cancel_multi_order(self, order_ids: List[str]) -> Dict[str, Any]:
+    async def cancel_multi_order(self, order_ids: List[str]) -> MultiOrderResponse:
         """
         Cancel multiple orders at once.
         
@@ -801,23 +1195,29 @@ class FyersClient:
             order_ids: List of order IDs to cancel
             
         Returns:
-            Multi-cancel response
+            MultiOrderResponse object
         """
         self._ensure_authenticated()
         
         orders = [{"id": order_id} for order_id in order_ids]
-        return await self._http_client.delete("/orders/multi", json_data=orders)
+        # Using DELETE on /multi-order/sync as inferred from structure,
+        # though official doc isn't explicit on the curl endpoint for basket cancel.
+        response = await self._http_client.delete("/multi-order/sync", json_data=orders)
+        return MultiOrderResponse(**response)
+    
+    # Alias for compatibility with official SDK naming
+    cancel_basket_orders = cancel_multi_order
     
     # ==================== API Logout ====================
     
-    async def api_logout(self) -> Dict[str, Any]:
+    async def api_logout(self) -> LogoutResponse:
         """
         Invalidate the access token via API.
         
         This invalidates the access token for this specific app only.
         
         Returns:
-            Logout response
+            LogoutResponse object
         """
         self._ensure_authenticated()
         
@@ -826,7 +1226,7 @@ class FyersClient:
         # Clear local auth state
         await self.logout()
         
-        return response
+        return LogoutResponse(**response)
     
     # ==================== GTT Orders ====================
     
@@ -841,7 +1241,7 @@ class FyersClient:
         leg2_price: Optional[float] = None,
         leg2_trigger_price: Optional[float] = None,
         leg2_qty: Optional[int] = None,
-    ) -> Dict[str, Any]:
+    ) -> OrderPlacementResponse:
         """
         Place a GTT (Good Till Trigger) order.
         
@@ -861,7 +1261,7 @@ class FyersClient:
             leg2_qty: Quantity for leg2 (OCO only)
             
         Returns:
-            GTT order placement response
+            OrderPlacementResponse object
         """
         self._ensure_authenticated()
         
@@ -888,7 +1288,8 @@ class FyersClient:
             "orderInfo": order_info,
         }
         
-        return await self._http_client.post("/gtt/orders/sync", json_data=data)
+        response = await self._http_client.post("/gtt/orders/sync", json_data=data)
+        return OrderPlacementResponse(**response)
     
     async def modify_gtt_order(
         self,
@@ -899,7 +1300,7 @@ class FyersClient:
         leg2_price: Optional[float] = None,
         leg2_trigger_price: Optional[float] = None,
         leg2_qty: Optional[int] = None,
-    ) -> Dict[str, Any]:
+    ) -> OrderModifyResponse:
         """
         Modify a pending GTT order.
         
@@ -913,7 +1314,7 @@ class FyersClient:
             leg2_qty: New quantity for leg2 (OCO only)
             
         Returns:
-            GTT order modification response
+            OrderModifyResponse object
         """
         self._ensure_authenticated()
         
@@ -946,11 +1347,12 @@ class FyersClient:
             "orderInfo": order_info,
         }
         
-        return await self._http_client.request(
+        response = await self._http_client.request(
             "PATCH", "/gtt/orders/sync", json_data=data
         )
+        return OrderModifyResponse(**response)
     
-    async def cancel_gtt_order(self, order_id: str) -> Dict[str, Any]:
+    async def cancel_gtt_order(self, order_id: str) -> OrderCancelResponse:
         """
         Cancel a pending GTT order.
         
@@ -958,29 +1360,31 @@ class FyersClient:
             order_id: GTT order ID to cancel
             
         Returns:
-            GTT order cancellation response
+            OrderCancelResponse object
         """
         self._ensure_authenticated()
         
         data = {"id": order_id}
-        return await self._http_client.delete("/gtt/orders/sync", json_data=data)
+        response = await self._http_client.delete("/gtt/orders/sync", json_data=data)
+        return OrderCancelResponse(**response)
     
-    async def get_gtt_orders(self) -> Dict[str, Any]:
+    async def get_gtt_orders(self) -> GTTOrdersResponse:
         """
         Get all pending GTT orders.
         
         Returns:
-            GTT order book
+            GTTOrdersResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/gtt/orders")
+        response = await self._http_client.get("/gtt/orders")
+        return GTTOrdersResponse(**response)
     
     # ==================== Modify Multi Orders ====================
     
     async def modify_multi_order(
         self,
         modifications: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> MultiOrderResponse:
         """
         Modify multiple orders at once (up to 10).
         
@@ -989,16 +1393,22 @@ class FyersClient:
                 Each should have 'id' and fields to modify.
                 
         Returns:
-            Multi-modify response
+            MultiOrderResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.request(
-            "PATCH", "/orders/multi", json_data=modifications
+        # Official docs don't explicitly show the method for multi-order modify in curl samples,
+        # but single order modify uses PATCH. Assuming PATCH for consistency.
+        response = await self._http_client.request(
+            "PATCH", "/multi-order/sync", json_data=modifications
         )
+        return MultiOrderResponse(**response)
+    
+    # Alias for compatibility with official SDK naming
+    modify_basket_orders = modify_multi_order
     
     # ==================== Exit Position Advanced ====================
     
-    async def exit_positions_by_ids(self, position_ids: List[str]) -> Dict[str, Any]:
+    async def exit_positions_by_ids(self, position_ids: List[str]) -> GenericResponse:
         """
         Exit multiple positions by their IDs.
         
@@ -1006,55 +1416,74 @@ class FyersClient:
             position_ids: List of position IDs to exit
             
         Returns:
-            Exit response
+            GenericResponse object
         """
         self._ensure_authenticated()
         
         data = {"id": position_ids}
-        return await self._http_client.delete("/positions", json_data=data)
+        response = await self._http_client.delete("/positions", json_data=data)
+        return GenericResponse(**response)
     
     async def exit_positions_by_segment(
         self,
-        segments: List[int],
-        sides: List[int],
+        segments: List[Union[int, Segment]],
+        sides: List[Union[int, OrderSide]],
         product_types: List[str],
-    ) -> Dict[str, Any]:
+    ) -> GenericResponse:
         """
         Exit positions by segment, side, and product type.
         
         Args:
-            segments: List of segment codes (10=CM, 11=Derivatives, 12=Currency, 20=Commodity)
-            sides: List of sides (1=Buy, -1=Sell)
+            segments: List of segments (use Segment.CAPITAL_MARKET, Segment.EQUITY_DERIVATIVES, etc.)
+            sides: List of sides (use OrderSide.BUY, OrderSide.SELL)
             product_types: List of product types (INTRADAY, CNC, etc.)
             
         Returns:
-            Exit response
+            GenericResponse object
+            
+        Example:
+            ```python
+            from broker.fyers.models.enums import Segment, OrderSide
+            
+            # Exit all buy positions in equity derivatives
+            await client.exit_positions_by_segment(
+                segments=[Segment.EQUITY_DERIVATIVES],
+                sides=[OrderSide.BUY],
+                product_types=["INTRADAY", "MARGIN"]
+            )
+            ```
         """
         self._ensure_authenticated()
         
+        # Convert enums to integers
+        segment_vals = [int(s) if isinstance(s, Segment) else s for s in segments]
+        side_vals = [int(s) if isinstance(s, OrderSide) else s for s in sides]
+        
         data = {
-            "segment": segments,
-            "side": sides,
+            "segment": segment_vals,
+            "side": side_vals,
             "productType": product_types,
         }
-        return await self._http_client.delete("/positions", json_data=data)
+        response = await self._http_client.delete("/positions", json_data=data)
+        return GenericResponse(**response)
     
-    async def exit_all_positions_with_pending_cancel(self) -> Dict[str, Any]:
+    async def exit_all_positions_with_pending_cancel(self) -> GenericResponse:
         """
         Exit all positions and cancel pending orders.
         
         Returns:
-            Exit response
+            GenericResponse object
         """
         self._ensure_authenticated()
         
         data = {"pending_orders_cancel": 1}
-        return await self._http_client.delete("/positions", json_data=data)
+        response = await self._http_client.delete("/positions", json_data=data)
+        return GenericResponse(**response)
     
     async def exit_position_with_pending_cancel(
         self,
         position_id: str,
-    ) -> Dict[str, Any]:
+    ) -> GenericResponse:
         """
         Exit a specific position and cancel its pending orders.
         
@@ -1062,7 +1491,7 @@ class FyersClient:
             position_id: Position ID to exit
             
         Returns:
-            Exit response
+            GenericResponse object
         """
         self._ensure_authenticated()
         
@@ -1070,14 +1499,15 @@ class FyersClient:
             "id": position_id,
             "pending_orders_cancel": 1,
         }
-        return await self._http_client.delete("/positions", json_data=data)
+        response = await self._http_client.delete("/positions", json_data=data)
+        return GenericResponse(**response)
     
     # ==================== Margin Calculator ====================
     
     async def calculate_span_margin(
         self,
         positions: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> MarginResponse:
         """
         Calculate span margin for given positions.
         
@@ -1092,21 +1522,22 @@ class FyersClient:
                 - stopLoss: Stop loss (default 0.0)
                 
         Returns:
-            Span margin calculation result
+            MarginResponse object with margin calculation
         """
         self._ensure_authenticated()
         
         data = {"data": positions}
-        return await self._http_client.post(
+        response = await self._http_client.post(
             "/span_margin",
             json_data=data,
             base_url="https://api.fyers.in/api/v2",
         )
+        return MarginResponse(**response)
     
     async def calculate_order_margin(
         self,
         orders: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> MarginResponse:
         """
         Calculate margin for multiple orders.
         
@@ -1123,28 +1554,33 @@ class FyersClient:
                 - takeProfit: Take profit (default 0.0)
                 
         Returns:
-            Margin calculation with available margin, total margin, and new order margin
+            MarginResponse object with margin calculation
         """
         self._ensure_authenticated()
         
         data = {"data": orders}
-        return await self._http_client.post("/multiorder/margin", json_data=data)
+        response = await self._http_client.post("/multiorder/margin", json_data=data)
+        return MarginResponse(**response)
     
     # ==================== Market Status ====================
     
-    async def get_market_status(self) -> Dict[str, Any]:
+    async def get_market_status(self) -> MarketStatusResponse:
         """
         Get current market status for all exchanges and segments.
         
         Returns:
-            Market status for each exchange/segment
+            MarketStatusResponse object with market status for each exchange/segment
         """
         self._ensure_authenticated()
-        return await self._http_client.get("/market-status")
+        response = await self._http_client.get(
+            "/marketStatus",
+            base_url="https://api-t1.fyers.in/data"
+        )
+        return MarketStatusResponse(**response)
     
     # ==================== eDIS (Electronic Delivery Instruction Slip) ====================
     
-    async def generate_edis_tpin(self) -> Dict[str, Any]:
+    async def generate_edis_tpin(self) -> GenericResponse:
         """
         Generate TPIN for eDIS transactions.
         
@@ -1152,15 +1588,16 @@ class FyersClient:
         authorize sell transactions from demat account.
         
         Returns:
-            TPIN generation response
+            GenericResponse object
         """
         self._ensure_authenticated()
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/tpin",
             base_url="https://api.fyers.in/api/v2",
         )
+        return GenericResponse(**response)
     
-    async def get_edis_details(self) -> Dict[str, Any]:
+    async def get_edis_details(self) -> GenericResponse:
         """
         Get eDIS authorization details.
         
@@ -1168,18 +1605,19 @@ class FyersClient:
         have been successfully completed.
         
         Returns:
-            eDIS authorization details
+            GenericResponse object with eDIS authorization details
         """
         self._ensure_authenticated()
-        return await self._http_client.get(
+        response = await self._http_client.get(
             "/details",
             base_url="https://api.fyers.in/api/v2",
         )
+        return GenericResponse(**response)
     
     async def get_edis_index_page(
         self,
         holdings: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> GenericResponse:
         """
         Get the CDSL page for eDIS authorization.
         
@@ -1190,21 +1628,22 @@ class FyersClient:
                 - symbol: Symbol (e.g., "NSE:SAIL-EQ")
                 
         Returns:
-            HTML page content for CDSL authorization
+            GenericResponse object with HTML page content for CDSL authorization
         """
         self._ensure_authenticated()
         
         data = {"recordLst": holdings}
-        return await self._http_client.post(
+        response = await self._http_client.post(
             "/index",
             json_data=data,
             base_url="https://api.fyers.in/api/v2",
         )
+        return GenericResponse(**response)
     
     async def check_edis_transaction_status(
         self,
         transaction_id: str,
-    ) -> Dict[str, Any]:
+    ) -> GenericResponse:
         """
         Check eDIS transaction status.
         
@@ -1213,16 +1652,17 @@ class FyersClient:
                 Example: For "915484108176", encode to "OTE1NDg0MTA4MTc2"
                 
         Returns:
-            Transaction status with success/failed counts
+            GenericResponse object with transaction status
         """
         self._ensure_authenticated()
         
         data = {"transactionId": transaction_id}
-        return await self._http_client.post(
+        response = await self._http_client.post(
             "/inquiry",
             json_data=data,
             base_url="https://api.fyers.in/api/v2",
         )
+        return GenericResponse(**response)
     
     # ==================== Rate Limit Info ====================
     
@@ -1577,40 +2017,178 @@ class FyersClient:
         """Ensure the client is authenticated."""
         if not self._is_authenticated:
             raise FyersAuthenticationError(
-                "Client is not authenticated. Call authenticate() first."
+                "Client is not authenticated. "
+                "Call 'await client.authenticate()' or 'client.authenticate_sync()' first.\n"
+                "\nQuick fix options:\n"
+                "  1. await client.authenticate()  # Opens browser if no saved token\n"
+                "  2. client.authenticate_sync()   # Same, but synchronous\n"
+                "  3. Use context manager: async with FyersClient(config) as client:\n"
+                "\nIf you have a token file, ensure it contains a valid, non-expired token."
             )
     
     async def __aenter__(self):
-        """Async context manager entry."""
-        await self.load_saved_token()
+        """
+        Async context manager entry.
+        
+        Automatically tries to load saved token when entering context.
+        If a valid token exists in storage, the client will be ready to use.
+        """
+        await self._try_load_saved_token(validate_with_api=True)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         # Persist rate limit state on exit
         self._rate_limiter.force_persist()
+    
+    # ==================== Synchronous Helpers ====================
+    
+    def authenticate_sync(
+        self,
+        redirect_url: Optional[str] = None,
+        verify_state: bool = True,
+        refresh_pin: Optional[str] = None,
+        auto_browser: bool = True,
+    ) -> TokenData:
+        """
+        Synchronous version of authenticate().
+        
+        Runs the async authenticate() in an event loop.
+        Use this when you're not in an async context.
+        
+        Args:
+            redirect_url: Optional redirect URL from OAuth callback
+            verify_state: Whether to verify OAuth state parameter
+            refresh_pin: PIN for refreshing expired tokens
+            auto_browser: If True, auto-opens browser for OAuth flow
+            
+        Returns:
+            TokenData with access token
+            
+        Example:
+            ```python
+            from broker.fyers import FyersClient, FyersConfig
+            
+            config = FyersConfig(
+                client_id="YOUR_CLIENT_ID",
+                secret_key="YOUR_SECRET",
+                token_file_path="fyers_token.json"
+            )
+            
+            client = FyersClient(config)
+            
+            # Simple sync authentication - just works!
+            client.authenticate_sync()
+            
+            # Now make API calls (use sync wrappers or run async)
+            import asyncio
+            quotes = asyncio.run(client.get_quotes(["NSE:SBIN-EQ"]))
+            ```
+        """
+        import asyncio
+        
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in an async context, use nest_asyncio or create task
+            raise RuntimeError(
+                "authenticate_sync() cannot be called from an async context. "
+                "Use 'await client.authenticate()' instead."
+            )
+        except RuntimeError:
+            # No running loop, safe to use asyncio.run()
+            return asyncio.run(
+                self.authenticate(
+                    redirect_url=redirect_url,
+                    verify_state=verify_state,
+                    refresh_pin=refresh_pin,
+                    auto_browser=auto_browser,
+                )
+            )
+    
+    def ensure_authenticated_sync(
+        self,
+        refresh_pin: Optional[str] = None,
+        auto_browser: bool = True,
+    ) -> TokenData:
+        """
+        Synchronous version of ensure_authenticated().
+        
+        Args:
+            refresh_pin: Optional PIN for token refresh
+            auto_browser: Whether to auto-open browser if no token exists
+            
+        Returns:
+            TokenData with access token
+        """
+        return self.authenticate_sync(
+            refresh_pin=refresh_pin,
+            auto_browser=auto_browser,
+        )
 
 
 # Factory function for easy client creation
 def create_client(
     client_id: str,
     secret_key: str,
-    redirect_uri: str = "https://trade.fyers.in/api-login/redirect-uri/index.html",
+    redirect_uri: str = "http://127.0.0.1:9000/",
     token_file: Optional[str] = None,
     rate_limit_file: Optional[str] = None,
+    auto_authenticate: bool = False,
+    auto_init: bool = True,
 ) -> FyersClient:
     """
     Create a FyersClient with minimal configuration.
     
+    This is the recommended way to create a client for quick scripts.
+    
     Args:
-        client_id: Fyers app ID
+        client_id: Fyers app ID (e.g., "TX4LY7JMLL-100")
         secret_key: Fyers app secret
-        redirect_uri: OAuth redirect URI
-        token_file: Optional file path for token storage
+        redirect_uri: OAuth redirect URI (default: localhost for easy local auth)
+        token_file: Optional file path for token storage (strongly recommended!)
         rate_limit_file: Optional file path for rate limit persistence
+        auto_authenticate: If True, calls authenticate_sync() immediately
+            (opens browser if no valid token)
+        auto_init: If True (default), tries to load saved token silently.
+            If token exists and is valid, client is ready to use without
+            calling authenticate(). No browser is opened.
         
     Returns:
-        Configured FyersClient instance
+        FyersClient instance (authenticated if auto_authenticate=True)
+        
+    Example (Scripts):
+        ```python
+        from broker.fyers import create_client
+        
+        # Simple! Just create and use (auto-authenticates)
+        client = create_client(
+            client_id="TX4LY7JMLL-100",
+            secret_key="YOUR_SECRET",
+            token_file="fyers_token.json",
+        )
+        
+        # Client is ready! Make calls with asyncio.run()
+        import asyncio
+        quotes = asyncio.run(client.get_quotes(["NSE:SBIN-EQ"]))
+        positions = asyncio.run(client.get_positions())
+        ```
+    
+    Example (Jupyter Notebooks - use async API):
+        ```python
+        from broker.fyers import FyersClient, FyersConfig
+        
+        config = FyersConfig(
+            client_id="TX4LY7JMLL-100",
+            secret_key="YOUR_SECRET",
+            token_file_path="fyers_token.json",
+        )
+        
+        client = FyersClient(config)
+        await client.authenticate()  # Use await!
+        
+        # Now make calls directly
+        quotes = await client.get_quotes(["NSE:SBIN-EQ"])
+        ```
     """
     config = FyersConfig(
         client_id=client_id,
@@ -1620,4 +2198,148 @@ def create_client(
         rate_limit_file_path=rate_limit_file,
     )
     
-    return FyersClient(config)
+    client = FyersClient(config)
+    
+    # Auto-authenticate if requested
+    if auto_authenticate:
+        try:
+            # Detect if we're in an async environment (e.g., Jupyter)
+            try:
+                asyncio.get_running_loop()
+                # Running loop detected - print helpful message
+                print("\n" + "="*60)
+                print("📓 Jupyter Notebook Detected")
+                print("="*60)
+                print("Auto-authentication skipped to avoid blocking.")
+                print("Please add one line after creating the client:\n")
+                print("  await client.authenticate()\n")
+                print("Full example:")
+                print("  client = create_client(...)")
+                print("  await client.authenticate()")
+                print("  quotes = await client.get_quotes([...])")
+                print("="*60 + "\n")
+            except RuntimeError:
+                # No running loop - safe to use sync auth
+                client.authenticate_sync()
+        except Exception as e:
+            logger.warning(f"Auto-authentication failed: {e}")
+    
+    return client
+
+
+async def create_client_async(
+    client_id: str,
+    secret_key: str,
+    redirect_uri: str = "http://127.0.0.1:9000/",
+    token_file: Optional[str] = None,
+    rate_limit_file: Optional[str] = None,
+) -> FyersClient:
+    """
+    Create and auto-authenticate a FyersClient (async version for Jupyter).
+    
+    This is the recommended way to use the SDK in Jupyter Notebooks.
+    
+    Args:
+        client_id: Your Fyers app ID
+        secret_key: Your Fyers app secret
+        redirect_uri: OAuth redirect URI
+        token_file: File path for token storage
+        rate_limit_file: File path for rate limit persistence
+        
+    Returns:
+        Authenticated FyersClient ready to use
+        
+    Example (Jupyter):
+        ```python
+        from broker.fyers import create_client_async
+        
+        client = await create_client_async(
+            client_id="TX4LY7JMLL-100",
+            secret_key="YOUR_SECRET",
+            token_file="fyers_token.json",
+        )
+        
+        # Ready to use!
+        quotes = await client.get_quotes(["NSE:SBIN-EQ"])
+        ```
+    """
+    config = FyersConfig(
+        client_id=client_id,
+        secret_key=secret_key,
+        redirect_uri=redirect_uri,
+        token_file_path=token_file,
+        rate_limit_file_path=rate_limit_file,
+    )
+    
+    client = FyersClient(config)
+    await client.authenticate()  # Auto-authenticate
+    
+    return client
+
+
+def create_client_from_env(
+    token_file: Optional[str] = None,
+    auto_authenticate: bool = False,
+    auto_init: bool = True,
+) -> FyersClient:
+    """
+    Create a FyersClient from environment variables.
+    
+    Required environment variables:
+    - FYERS_CLIENT_ID: Your Fyers app ID
+    - FYERS_SECRET_KEY: Your Fyers app secret
+    
+    Optional environment variables:
+    - FYERS_REDIRECT_URI: OAuth redirect URI (default: http://127.0.0.1:9000/)
+    - FYERS_TOKEN_FILE: Token file path (can be overridden by token_file arg)
+    
+    Args:
+        token_file: Override for token file path (uses FYERS_TOKEN_FILE if None)
+        auto_authenticate: If True, authenticates immediately
+        auto_init: If True (default), tries to load saved token silently
+        
+    Returns:
+        Configured FyersClient instance
+        
+    Raises:
+        ValueError: If required environment variables are not set
+        
+    Example:
+        ```bash
+        # Set environment variables first
+        export FYERS_CLIENT_ID="TX4LY7JMLL-100"
+        export FYERS_SECRET_KEY="YOUR_SECRET"
+        export FYERS_TOKEN_FILE="fyers_token.json"
+        ```
+        
+        ```python
+        from broker.fyers import create_client_from_env
+        
+        # Creates client from env vars - super clean!
+        client = create_client_from_env()
+        
+        if client.is_authenticated:
+            print(f"Hello, {client.user_name}!")
+        else:
+            client.authenticate_sync()
+        ```
+    """
+    import os
+    
+    config = FyersConfig.from_env(token_file=token_file)
+    
+    client = FyersClient(config)
+    
+    # Try to load saved token silently
+    effective_token_file = token_file or os.environ.get("FYERS_TOKEN_FILE")
+    if auto_init and effective_token_file:
+        try:
+            asyncio.run(client._try_load_saved_token(validate_with_api=True))
+        except Exception as e:
+            logger.debug(f"Auto-init token load failed: {e}")
+    
+    # Full authentication if requested
+    if auto_authenticate and not client.is_authenticated:
+        client.authenticate_sync()
+    
+    return client

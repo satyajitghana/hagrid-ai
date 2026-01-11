@@ -3,7 +3,7 @@ Pydantic models for Fyers API responses.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Union
 
 # Import enums from the enums module
 from broker.fyers.models.enums import (
@@ -23,31 +23,65 @@ from broker.fyers.models.enums import (
 # ==================== Profile ====================
 
 class ProfileData(BaseModel):
-    """User profile data."""
+    """
+    User profile data from Fyers API.
+    
+    Contains user information including name, ID, email, and various
+    account settings and statuses.
+    
+    Note: As per Fyers privacy policy, PII (Personally Identifiable Information)
+    may be masked to safeguard customer information.
+    """
     name: str = Field(..., description="Name of the client")
-    display_name: Optional[str] = Field(None, description="Display name")
-    fy_id: str = Field(..., description="Client ID of the fyers user")
-    image: Optional[str] = Field(None, description="URL to profile picture")
-    email_id: str = Field(..., description="Email address")
-    pan: Optional[str] = Field(None, alias="PAN", description="PAN of the client")
-    pin_change_date: Optional[str] = Field(None, description="Last PIN change date")
-    pwd_change_date: Optional[str] = Field(None, description="Last password change date")
-    mobile_number: Optional[str] = Field(None, description="Registered mobile number")
-    totp: Optional[bool] = Field(None, description="TOTP status")
-    pwd_to_expire: Optional[int] = Field(None, description="Days until password expires")
-    ddpi_enabled: Optional[bool] = Field(None, description="DDPI status")
-    mtf_enabled: Optional[bool] = Field(None, description="MTF status")
+    display_name: Optional[str] = Field(None, description="Display name, if any, provided by the client")
+    fy_id: str = Field(..., description="The client ID of the fyers user")
+    image: Optional[str] = Field(None, description="URL link to the user's profile picture, if any")
+    email_id: str = Field(..., description="Email address of the client")
+    pan: Optional[str] = Field(None, description="PAN of the client (may be masked)")
+    pin_change_date: Optional[str] = Field(None, description="Date when last PIN was updated")
+    pwd_change_date: Optional[str] = Field(None, description="Date when last password was updated")
+    mobile_number: Optional[str] = Field(None, description="Registered mobile number (may be masked)")
+    totp: Optional[bool] = Field(None, description="Status of TOTP")
+    pwd_to_expire: Optional[int] = Field(None, description="Number of days until the current password expires")
+    ddpi_enabled: Optional[bool] = Field(None, description="Status of DDPI")
+    mtf_enabled: Optional[bool] = Field(None, description="Status of MTF")
+    
+    class Config:
+        """Pydantic model configuration."""
+        populate_by_name = True
+        extra = "ignore"  # Ignore extra fields from API
 
 
 class ProfileResponse(BaseModel):
-    """Profile API response."""
+    """
+    Profile API response.
+    
+    This endpoint can be used to verify if a token is valid by checking
+    if it returns the user's profile successfully.
+    """
     s: str = Field(..., description="Status: ok/error")
     code: int = Field(..., description="Response code")
     message: Optional[str] = Field("", description="Response message")
     data: Optional[ProfileData] = Field(None, description="Profile data")
 
     def is_success(self) -> bool:
+        """Check if the response indicates success."""
         return self.s == "ok" and self.code == 200
+    
+    @property
+    def user_name(self) -> Optional[str]:
+        """Get the user's name."""
+        return self.data.name if self.data else None
+    
+    @property
+    def user_id(self) -> Optional[str]:
+        """Get the Fyers user ID."""
+        return self.data.fy_id if self.data else None
+    
+    @property
+    def email(self) -> Optional[str]:
+        """Get the user's email."""
+        return self.data.email_id if self.data else None
 
 
 # ==================== Funds ====================
@@ -128,6 +162,19 @@ class HoldingsResponse(BaseModel):
 
     def is_success(self) -> bool:
         return self.s == "ok" and self.code == 200
+    
+    @property
+    def dataframe(self) -> "pd.DataFrame":
+        """Get holdings as DataFrame."""
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas required. Install: pip install pandas")
+        
+        if not self.holdings:
+            return pd.DataFrame()
+        
+        return pd.DataFrame([h.model_dump() for h in self.holdings])
 
 
 # ==================== Orders ====================
@@ -185,6 +232,19 @@ class OrdersResponse(BaseModel):
 
     def is_success(self) -> bool:
         return self.s == "ok" and self.code == 200
+    
+    @property
+    def dataframe(self) -> "pd.DataFrame":
+        """Get orders as DataFrame."""
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas required. Install: pip install pandas")
+        
+        if not self.orderBook:
+            return pd.DataFrame()
+        
+        return pd.DataFrame([o.model_dump() for o in self.orderBook])
 
 
 # ==================== Positions ====================
@@ -244,6 +304,19 @@ class PositionsResponse(BaseModel):
 
     def is_success(self) -> bool:
         return self.s == "ok" and self.code == 200
+    
+    @property
+    def dataframe(self) -> "pd.DataFrame":
+        """Get positions as DataFrame."""
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas required. Install: pip install pandas")
+        
+        if not self.netPositions:
+            return pd.DataFrame()
+        
+        return pd.DataFrame([p.model_dump() for p in self.netPositions])
 
 
 # ==================== Trades ====================
@@ -278,6 +351,19 @@ class TradesResponse(BaseModel):
 
     def is_success(self) -> bool:
         return self.s == "ok" and self.code == 200
+    
+    @property
+    def dataframe(self) -> "pd.DataFrame":
+        """Get trades as DataFrame."""
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas required. Install: pip install pandas")
+        
+        if not self.tradeBook:
+            return pd.DataFrame()
+        
+        return pd.DataFrame([t.model_dump() for t in self.tradeBook])
 
 
 # ==================== Order Placement ====================
@@ -352,6 +438,292 @@ class LogoutResponse(BaseModel):
 
     def is_success(self) -> bool:
         return self.s == "ok" and self.code == 200
+
+
+# ==================== History ====================
+
+class HistoryResponse(BaseModel):
+    """History API response."""
+    s: str = Field(..., description="Status: ok/error")
+    candles: Optional[List[List[Union[float, int]]]] = Field(None, description="Candle data")
+    next_page: Optional[int] = Field(None, description="Next page cursor")
+    prev_page: Optional[int] = Field(None, description="Previous page cursor")
+
+    def is_success(self) -> bool:
+        return self.s == "ok"
+    
+    @property
+    def dataframe(self) -> "pd.DataFrame":
+        """
+        Get historical candles as pandas DataFrame.
+        
+        Example:
+            ```python
+            history = await client.get_history(...)
+            df = history.dataframe  # Instant conversion!
+            print(df[['datetime', 'open', 'high', 'low', 'close', 'volume']])
+            ```
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas required for .dataframe property. Install: pip install pandas")
+        
+        if not self.candles:
+            return pd.DataFrame()
+        
+        columns = ["epoch", "open", "high", "low", "close", "volume"]
+        if self.candles and len(self.candles[0]) > 6:
+            columns.append("oi")
+        
+        df = pd.DataFrame(self.candles, columns=columns[:len(self.candles[0])])
+        df["datetime"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert('Asia/Kolkata')
+        
+        return df
+
+
+# ==================== Market Data Responses ====================
+
+class QuoteData(BaseModel):
+    """Individual quote data."""
+    n: str = Field(..., description="Symbol name")
+    s: str = Field(..., description="Status")
+    v: Dict[str, Any] = Field(..., description="Quote values")
+
+
+class QuotesResponse(BaseModel):
+    """Quotes API response."""
+    s: str = Field(..., description="Status: ok/error")
+    code: int = Field(..., description="Response code")
+    d: Optional[List[QuoteData]] = Field(None, description="Quote data list")
+
+    def is_success(self) -> bool:
+        return self.s == "ok" and self.code == 200
+
+
+class MarketDepthLevel(BaseModel):
+    """Market depth level (bid/ask)."""
+    price: float = Field(..., description="Price")
+    volume: int = Field(..., description="Volume")
+    ord: int = Field(..., description="Number of orders")
+
+
+class MarketDepthData(BaseModel):
+    """Market depth data for a symbol."""
+    totalbuyqty: int = Field(..., description="Total buy quantity")
+    totalsellqty: int = Field(..., description="Total sell quantity")
+    bids: List[MarketDepthLevel] = Field(..., description="Bid levels")
+    ask: List[MarketDepthLevel] = Field(..., description="Ask levels")
+    o: float = Field(..., description="Open price")
+    h: float = Field(..., description="High price")
+    l: float = Field(..., description="Low price")
+    c: float = Field(..., description="Close price")
+    chp: float = Field(..., description="Change percentage")
+    tick_Size: float = Field(..., alias="tick_Size", description="Tick size")
+    ch: float = Field(..., description="Change")
+    ltq: int = Field(..., description="Last traded quantity")
+    ltt: int = Field(..., description="Last traded time")
+    ltp: float = Field(..., description="Last traded price")
+    v: int = Field(..., description="Volume")
+    atp: float = Field(..., description="Average traded price")
+    lower_ckt: float = Field(..., description="Lower circuit limit")
+    upper_ckt: float = Field(..., description="Upper circuit limit")
+    expiry: str = Field("", description="Expiry date")
+    oi: float = Field(0, description="Open interest")
+    oiflag: bool = Field(False, description="OI flag")
+    pdoi: int = Field(0, description="Previous day OI")
+    oipercent: float = Field(0, description="OI change percentage")
+
+
+class MarketDepthResponse(BaseModel):
+    """Market Depth API response."""
+    s: str = Field(..., description="Status: ok/error")
+    d: Dict[str, MarketDepthData] = Field(..., description="Depth data by symbol")
+    message: str = Field("", description="Response message")
+
+    def is_success(self) -> bool:
+        return self.s == "ok"
+
+
+class MarketStatusItem(BaseModel):
+    """Market status for exchange/segment."""
+    exchange: int = Field(..., description="Exchange code")
+    market_type: str = Field(..., description="Market type")
+    segment: int = Field(..., description="Segment code")
+    status: str = Field(..., description="Market status")
+
+
+class MarketStatusResponse(BaseModel):
+    """Market Status API response."""
+    s: str = Field(..., description="Status: ok/error")
+    code: int = Field(..., description="Response code")
+    message: str = Field("", description="Response message")
+    marketStatus: Optional[List[MarketStatusItem]] = Field(None, description="Market status list")
+
+    def is_success(self) -> bool:
+        return self.s == "ok" and self.code == 200
+
+
+class MarginCalculation(BaseModel):
+    """Margin calculation result."""
+    margin_avail: float = Field(..., description="Available margin")
+    margin_total: float = Field(..., description="Total margin required")
+    margin_new_order: float = Field(..., description="Margin for new order including positions")
+
+
+class MarginResponse(BaseModel):
+    """Margin calculator API response."""
+    s: str = Field(..., description="Status: ok/error")
+    code: int = Field(..., description="Response code")
+    message: str = Field("", description="Response message")
+    data: Optional[MarginCalculation] = Field(None, description="Margin data")
+
+    def is_success(self) -> bool:
+        return self.s == "ok" and self.code == 200
+
+
+# ==================== GTT Orders ====================
+
+class GTTOrderItem(BaseModel):
+    """Individual GTT order item."""
+    clientId: Optional[str] = Field(None, description="Client ID")
+    exchange: int = Field(..., description="Exchange")
+    fy_token: str = Field(..., description="Fytoken")
+    id_fyers: str = Field(..., description="Fyers system ID")
+    id: str = Field(..., description="Order ID")
+    instrument: int = Field(..., description="Instrument type")
+    lot_size: int = Field(..., description="Lot size")
+    multiplier: int = Field(..., description="Multiplier")
+    ord_status: int = Field(..., description="Order status")
+    precision: int = Field(..., description="Precision")
+    price_limit: float = Field(..., description="Leg1 limit price")
+    price2_limit: Optional[float] = Field(None, description="Leg2 limit price")
+    price_trigger: float = Field(..., description="Leg1 trigger price")
+    price2_trigger: Optional[float] = Field(None, description="Leg2 trigger price")
+    product_type: str = Field(..., description="Product type")
+    qty: int = Field(..., description="Leg1 quantity")
+    qty2: Optional[int] = Field(None, description="Leg2 quantity")
+    report_type: str = Field(..., description="Report type")
+    segment: int = Field(..., description="Segment")
+    symbol: str = Field(..., description="Symbol")
+    symbol_desc: str = Field(..., description="Symbol description")
+    symbol_exch: str = Field(..., description="Exchange symbol")
+    tick_size: float = Field(..., description="Tick size")
+    tran_side: int = Field(..., description="Transaction side")
+    gtt_oco_ind: int = Field(..., description="GTT/OCO indicator (1=GTT, 2=OCO)")
+    create_time: str = Field(..., description="Creation time")
+    create_time_epoch: int = Field(..., description="Creation epoch")
+    oms_msg: str = Field(..., description="OMS message")
+    ltp_ch: float = Field(0, description="LTP change")
+    ltp_chp: float = Field(0, description="LTP change percentage")
+    ltp: float = Field(0, description="Last traded price")
+
+
+class GTTOrdersResponse(BaseModel):
+    """GTT Orders API response."""
+    s: str = Field(..., description="Status: ok/error")
+    code: int = Field(..., description="Response code")
+    message: str = Field("", description="Response message")
+    orderBook: Optional[List[GTTOrderItem]] = Field(None, description="GTT order book")
+
+    def is_success(self) -> bool:
+        return self.s == "ok" and self.code == 200
+
+
+# ==================== Option Chain ====================
+
+class ExpiryData(BaseModel):
+    """Expiry date information."""
+    date: str = Field(..., description="Expiry date (DD-MM-YYYY)")
+    expiry: str = Field(..., description="Expiry timestamp")
+
+
+class IndiaVIXData(BaseModel):
+    """India VIX data."""
+    ask: float = Field(0, description="Ask price")
+    bid: float = Field(0, description="Bid price")
+    description: str = Field(..., description="Description")
+    ex_symbol: str = Field(..., description="Exchange symbol")
+    exchange: str = Field(..., description="Exchange")
+    fyToken: str = Field(..., description="Fytoken")
+    ltp: float = Field(..., description="Last traded price")
+    ltpch: float = Field(..., description="LTP change")
+    ltpchp: float = Field(..., description="LTP change percentage")
+    option_type: str = Field("", description="Option type")
+    strike_price: int = Field(-1, description="Strike price")
+    symbol: str = Field(..., description="Symbol")
+
+
+class OptionContractData(BaseModel):
+    """Individual option contract data."""
+    ask: float = Field(..., description="Ask price")
+    bid: float = Field(..., description="Bid price")
+    fyToken: str = Field(..., description="Fytoken")
+    ltp: float = Field(..., description="Last traded price")
+    ltpch: Optional[float] = Field(None, description="LTP change")
+    ltpchp: Optional[float] = Field(None, description="LTP change percentage")
+    oi: Optional[int] = Field(None, description="Open interest")
+    oich: Optional[int] = Field(None, description="OI change")
+    oichp: Optional[float] = Field(None, description="OI change percentage")
+    option_type: str = Field(..., description="Option type (CE/PE)")
+    prev_oi: Optional[int] = Field(None, description="Previous OI")
+    strike_price: float = Field(..., description="Strike price")
+    symbol: str = Field(..., description="Symbol")
+    volume: Optional[int] = Field(None, description="Volume")
+    
+    # Underlying data (for first row)
+    description: Optional[str] = Field(None, description="Description")
+    ex_symbol: Optional[str] = Field(None, description="Exchange symbol")
+    exchange: Optional[str] = Field(None, description="Exchange")
+    fp: Optional[float] = Field(None, description="Future price")
+    fpch: Optional[float] = Field(None, description="Future price change")
+    fpchp: Optional[float] = Field(None, description="Future price change %")
+
+
+class OptionChainResponse(BaseModel):
+    """Option Chain API response."""
+    s: str = Field(..., description="Status: ok/error")
+    code: int = Field(..., description="Response code")
+    message: str = Field("", description="Response message")
+    data: Optional[Dict[str, Any]] = Field(None, description="Option chain data")
+
+    def is_success(self) -> bool:
+        return self.s == "ok" and self.code == 200
+    
+    def get_call_oi(self) -> int:
+        """Get total call OI."""
+        return self.data.get("callOi", 0) if self.data else 0
+    
+    def get_put_oi(self) -> int:
+        """Get total put OI."""
+        return self.data.get("putOi", 0) if self.data else 0
+    
+    def get_options_chain(self) -> List[Dict[str, Any]]:
+        """Get options chain list."""
+        return self.data.get("optionsChain", []) if self.data else []
+    
+    @property
+    def dataframe(self) -> "pd.DataFrame":
+        """
+        Get options chain as pandas DataFrame.
+        
+        Example:
+            ```python
+            oc = await client.get_option_chain("NSE:NIFTY50-INDEX")
+            df = oc.dataframe  # Automatic conversion!
+            print(df[['strike_price', 'option_type', 'ltp', 'oi']])
+            ```
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas required for .dataframe property. Install: pip install pandas")
+        
+        options = self.get_options_chain()
+        if not options:
+            return pd.DataFrame()
+        
+        return pd.DataFrame(options)
 
 
 # ==================== Generic API Response ====================

@@ -2,25 +2,46 @@
 Configuration models for the Fyers SDK.
 """
 
-from pydantic import BaseModel, Field, field_validator
+import os
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 import hashlib
 
 
 class FyersConfig(BaseModel):
-    """Configuration for the Fyers client."""
+    """
+    Configuration for the Fyers client.
+    
+    Supports loading credentials from environment variables:
+    - FYERS_CLIENT_ID: App ID
+    - FYERS_SECRET_KEY: App secret
+    - FYERS_REDIRECT_URI: OAuth redirect URI (optional)
+    - FYERS_TOKEN_FILE: Token file path (optional)
+    
+    Example:
+        ```python
+        # From environment variables
+        config = FyersConfig.from_env()
+        
+        # Or explicitly
+        config = FyersConfig(
+            client_id="TX4LY7JMLL-100",
+            secret_key="YOUR_SECRET",
+        )
+        ```
+    """
     
     client_id: str = Field(
-        ...,
+        default="",
         description="App ID received after creating the app (e.g., 'TX4LY7JMLL-100')"
     )
     secret_key: str = Field(
-        ...,
+        default="",
         description="App secret key"
     )
     redirect_uri: str = Field(
-        default="https://trade.fyers.in/api-login/redirect-uri/index.html",
-        description="Redirect URI for OAuth flow"
+        default="http://127.0.0.1:9000/",
+        description="Redirect URI for OAuth flow (default: localhost for easy local auth)"
     )
     
     # API endpoints
@@ -70,6 +91,64 @@ class FyersConfig(BaseModel):
         if not v.startswith("http://") and not v.startswith("https://"):
             raise ValueError("redirect_uri must start with http:// or https://")
         return v
+    
+    @model_validator(mode="after")
+    def validate_credentials(self) -> "FyersConfig":
+        """Ensure credentials are provided."""
+        if not self.client_id or not self.secret_key:
+            raise ValueError(
+                "client_id and secret_key are required. "
+                "Provide them directly or set FYERS_CLIENT_ID and FYERS_SECRET_KEY environment variables."
+            )
+        return self
+    
+    @classmethod
+    def from_env(
+        cls,
+        token_file: Optional[str] = None,
+        rate_limit_file: Optional[str] = None,
+    ) -> "FyersConfig":
+        """
+        Create configuration from environment variables.
+        
+        Environment variables:
+        - FYERS_CLIENT_ID: App ID (required)
+        - FYERS_SECRET_KEY: App secret (required)
+        - FYERS_REDIRECT_URI: OAuth redirect URI (optional)
+        - FYERS_TOKEN_FILE: Token file path (optional)
+        
+        Args:
+            token_file: Override for token file path
+            rate_limit_file: Override for rate limit file path
+            
+        Returns:
+            FyersConfig instance
+            
+        Raises:
+            ValueError: If required environment variables are not set
+            
+        Example:
+            ```python
+            # Set environment variables first:
+            # export FYERS_CLIENT_ID="TX4LY7JMLL-100"
+            # export FYERS_SECRET_KEY="YOUR_SECRET"
+            
+            config = FyersConfig.from_env()
+            client = FyersClient(config)
+            ```
+        """
+        client_id = os.environ.get("FYERS_CLIENT_ID", "")
+        secret_key = os.environ.get("FYERS_SECRET_KEY", "")
+        redirect_uri = os.environ.get("FYERS_REDIRECT_URI", "http://127.0.0.1:9000/")
+        env_token_file = os.environ.get("FYERS_TOKEN_FILE")
+        
+        return cls(
+            client_id=client_id,
+            secret_key=secret_key,
+            redirect_uri=redirect_uri,
+            token_file_path=token_file or env_token_file,
+            rate_limit_file_path=rate_limit_file,
+        )
     
     def get_app_id_hash(self) -> str:
         """
