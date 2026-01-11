@@ -1,6 +1,6 @@
 from agno.tools import Toolkit
 from broker.interface import BrokerService
-from core.indicators import compute_technical_analysis
+from core.indicators import compute_technical_analysis, compute_correlation_matrix
 from typing import List, Dict, Any
 import json
 import pandas as pd
@@ -19,7 +19,8 @@ class BrokerToolkit(Toolkit):
             self.place_order,
             self.get_positions,
             self.calculate_margin,
-            self.get_technical_analysis  # New: returns computed indicators
+            self.get_technical_indicators,
+            self.get_correlation_matrix
         ]
         
         super().__init__(name="broker_toolkit", tools=tools, **kwargs)
@@ -199,3 +200,103 @@ class BrokerToolkit(Toolkit):
         data = result.get("data", {})
         
         return f"MARGIN_REQUIRED: {data.get('margin_total')}, MARGIN_AVAILABLE: {data.get('margin_avail')}, MARGIN_AFTER: {data.get('margin_new_order')}"
+
+    async def get_technical_indicators(self, symbol: str, resolution: str = "D", days: int = 100) -> str:
+        """
+        Get computed technical indicators from broker historical data.
+        
+        Args:
+            symbol (str): Symbol in format "NSE:SBIN-EQ"
+            resolution (str): Candle resolution
+            days (int): Days of history
+            
+        Returns:
+            str: JSON string of computed indicators
+        """
+        try:
+            csv_data = await self.get_historical_data(symbol, resolution, days)
+            lines = csv_data.split("\n")
+            if len(lines) <= 1:
+                return json.dumps({"error": "No data found"})
+                
+            # Parse CSV back to list of dicts for compute function
+            # TIMESTAMP,OPEN,HIGH,LOW,CLOSE,VOLUME
+            header = lines[0].split(",")
+            
+            ohlcv_list = []
+            for line in lines[1:]:
+                parts = line.split(",")
+                if len(parts) >= 6:
+                    ohlcv_list.append({
+                        "timestamp": int(parts[0]),
+                        "open": float(parts[1]),
+                        "high": float(parts[2]),
+                        "low": float(parts[3]),
+                        "close": float(parts[4]),
+                        "volume": int(parts[5])
+                    })
+            
+            df = pd.DataFrame(ohlcv_list)
+            indicators = compute_technical_analysis(df)
+            indicators['symbol'] = symbol
+            
+            return json.dumps(indicators, indent=2)
+            
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    async def get_correlation_matrix(self, symbols: List[str], days: int = 100) -> str:
+        """
+        Fetch historical data for multiple symbols and compute correlation matrix.
+        
+        Args:
+            symbols (List[str]): List of symbols to analyze
+            days (int): Number of history days to use
+            
+        Returns:
+            str: JSON string of correlation matrix
+        """
+        try:
+            data = {}
+            for symbol in symbols:
+                # Reuse existing method to get history
+                # We need to parse the CSV string it returns
+                csv_data = await self.get_historical_data(symbol, days=days)
+                
+                # Simple parsing of the CSV string returned by get_historical_data
+                lines = csv_data.split("\n")
+                if len(lines) > 1:
+                    header = lines[0].split(",")
+                    close_idx = header.index("CLOSE") if "CLOSE" in header else 4
+                    ts_idx = header.index("TIMESTAMP") if "TIMESTAMP" in header else 0
+                    
+                    prices = []
+                    timestamps = []
+                    for line in lines[1:]:
+                        parts = line.split(",")
+                        if len(parts) > close_idx:
+                            timestamps.append(int(parts[ts_idx]))
+                            prices.append(float(parts[close_idx]))
+                            
+                    if prices:
+                        # Create series with timestamp index
+                        s = pd.Series(prices, index=timestamps, name=symbol)
+                        # Convert timestamp to datetime for proper alignment
+                        s.index = pd.to_datetime(s.index, unit='s')
+                        data[symbol] = s
+            
+            if not data:
+                return json.dumps({"error": "No data retrieved for symbols"})
+                
+            # Align data on dates
+            df = pd.DataFrame(data).dropna()
+            
+            if df.empty:
+                return json.dumps({"error": "No overlapping data found"})
+                
+            # Compute correlation
+            matrix = compute_correlation_matrix(df)
+            return json.dumps(matrix, indent=2)
+            
+        except Exception as e:
+            return json.dumps({"error": str(e)})

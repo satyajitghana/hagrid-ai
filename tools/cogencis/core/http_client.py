@@ -53,11 +53,23 @@ class CogencisHTTPClient:
         return self._client
 
     def _get_default_headers(self) -> dict[str, str]:
-        """Get default headers for API requests."""
+        """Get default headers for API requests (browser-like headers for CORS compatibility)."""
         return {
-            "Accept": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-GB,en;q=0.9,en-US;q=0.8",
             "Authorization": f"Bearer {self.bearer_token}",
             "Cache-Control": "no-cache",
+            "DNT": "1",
+            "Origin": "https://iinvest.cogencis.com",
+            "Pragma": "no-cache",
+            "Priority": "u=1, i",
+            "Sec-CH-UA": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"macOS"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
         }
 
     def _handle_response(self, response: httpx.Response) -> dict[str, Any]:

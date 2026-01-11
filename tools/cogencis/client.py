@@ -1198,6 +1198,298 @@ class CogencisClient:
 
         return md
 
+    def get_full_report_markdown(
+        self,
+        symbol: SymbolData,
+        page_size: int = 10,
+    ) -> str:
+        """
+        Get a comprehensive markdown report for a given SymbolData.
+        
+        This method calls all 11 API endpoints and compiles a complete
+        markdown report including:
+        - Company Overview
+        - Key Shareholders
+        - Corporate Actions
+        - Announcements
+        - News
+        - Insider Trading
+        - SAST (Substantial Acquisitions)
+        - Block Deals
+        - Bulk Deals
+        - Capital History
+        - Tribunal Cases
+        - Auditors
+
+        Args:
+            symbol: SymbolData object from symbol_lookup
+            page_size: Number of results per section (default: 10)
+
+        Returns:
+            Comprehensive markdown formatted string
+
+        Example:
+            >>> symbols = client.symbol_lookup("RELIANCE")
+            >>> report = client.get_full_report_markdown(symbols[0])
+            >>> print(report)
+        """
+        path = symbol.path
+        isin = symbol.isin
+
+        md = f"# {symbol.company_name}\n\n"
+        md += f"*Generated Report - All data from Cogencis API*\n\n"
+        md += "---\n\n"
+        
+        # 1. Company Overview
+        md += "## 📊 Overview\n\n"
+        md += f"| Field | Value |\n"
+        md += f"|-------|-------|\n"
+        md += f"| **Company Name** | {symbol.company_name} |\n"
+        md += f"| **Symbol** | {symbol.ticker} |\n"
+        md += f"| **ISIN** | {symbol.isin} |\n"
+        md += f"| **Exchange** | {symbol.exchange} |\n"
+        md += f"| **Last Price** | ₹{symbol.last_price:,.2f} |\n"
+        if symbol.price_change is not None:
+            change_emoji = "📈" if symbol.price_change >= 0 else "📉"
+            md += f"| **Change** | {change_emoji} ₹{symbol.price_change:,.2f} ({symbol.percent_change:+.2f}%) |\n"
+        md += "\n"
+
+        # 2. Key Shareholders
+        try:
+            shareholders = self.get_key_shareholders(path, page_size=20)
+            if shareholders:
+                md += "## 👥 Key Shareholders\n\n"
+                
+                # Promoters
+                promoters = [s for s in shareholders if s.is_promoter and not s.is_group]
+                if promoters:
+                    md += "### Promoters\n\n"
+                    md += "| Name | Holding (%) |\n"
+                    md += "|------|------------|\n"
+                    for p in promoters[:page_size]:
+                        holding = p.get_latest_holding()
+                        pct = f"{holding.percentage:.2f}%" if holding else "N/A"
+                        md += f"| {p.description} | {pct} |\n"
+                    md += "\n"
+                
+                # Public/Institutional
+                others = [s for s in shareholders if not s.is_promoter and not s.is_group]
+                if others:
+                    md += "### Major Public/Institutional Shareholders\n\n"
+                    md += "| Name | Holding (%) |\n"
+                    md += "|------|------------|\n"
+                    for s in others[:page_size]:
+                        holding = s.get_latest_holding()
+                        pct = f"{holding.percentage:.2f}%" if holding else "N/A"
+                        md += f"| {s.description} | {pct} |\n"
+                    md += "\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch shareholders: {e}")
+            md += "## 👥 Key Shareholders\n\n*Data unavailable*\n\n"
+
+        # 3. Corporate Actions
+        try:
+            actions = self.get_corporate_actions(path, page_size=page_size)
+            md += "## 📋 Corporate Actions\n\n"
+            if actions:
+                md += "| Ex-Date | Purpose | Details |\n"
+                md += "|---------|---------|--------|\n"
+                for act in actions:
+                    details = ""
+                    if act.is_dividend:
+                        details = f"₹{act.dividend_amount}" if act.dividend_amount else "Dividend"
+                    elif act.is_bonus:
+                        details = f"{act.bonus_ratio}" if act.bonus_ratio else "Bonus"
+                    elif act.is_split:
+                        details = f"FV: {act.face_value_old} → {act.face_value_new}"
+                    ex_date = act.ex_date_parsed or act.ex_date or "N/A"
+                    md += f"| {ex_date} | {act.purpose} | {details} |\n"
+                md += "\n"
+            else:
+                md += "*No corporate actions found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch corporate actions: {e}")
+            md += "## 📋 Corporate Actions\n\n*Data unavailable*\n\n"
+
+        # 4. Announcements
+        try:
+            announcements = self.get_announcements(path, page_size=page_size)
+            md += "## 📢 Recent Announcements\n\n"
+            if announcements:
+                for ann in announcements:
+                    dt = ann.datetime_parsed or ann.datetime_str or "N/A"
+                    md += f"- **{dt}**: {ann.details}\n"
+                    if ann.has_pdf:
+                        md += f"  - 📎 [View PDF]({ann.pdf_link})\n"
+                md += "\n"
+            else:
+                md += "*No announcements found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch announcements: {e}")
+            md += "## 📢 Recent Announcements\n\n*Data unavailable*\n\n"
+
+        # 5. News
+        try:
+            news = self.get_news(isin, page_size=page_size)
+            md += "## 📰 Latest News\n\n"
+            if news:
+                for n in news:
+                    headline = n.headline
+                    source = n.source_name or "Unknown"
+                    date = n.source_datetime_parsed or ""
+                    link = n.source_link or "#"
+                    md += f"- **[{headline}]({link})**\n"
+                    md += f"  - *{source}* | {date}\n"
+                    if n.synopsis:
+                        md += f"  - > {n.synopsis[:200]}{'...' if len(n.synopsis) > 200 else ''}\n"
+                md += "\n"
+            else:
+                md += "*No news found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch news: {e}")
+            md += "## 📰 Latest News\n\n*Data unavailable*\n\n"
+
+        # 6. Insider Trading
+        try:
+            trades = self.get_insider_trades(path, page_size=page_size)
+            md += "## 🔒 Insider Trading\n\n"
+            if trades:
+                md += "| Date | Name | Category | Type | Qty | Mode |\n"
+                md += "|------|------|----------|------|-----|------|\n"
+                for t in trades:
+                    date = t.date_parsed or t.date or "N/A"
+                    qty = f"{t.quantity:,}" if t.quantity else "N/A"
+                    md += f"| {date} | {t.acquirer_name[:30]}{'...' if len(t.acquirer_name) > 30 else ''} | {t.category} | {t.transaction_type} | {qty} | {t.acquisition_mode} |\n"
+                md += "\n"
+            else:
+                md += "*No insider trades found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch insider trades: {e}")
+            md += "## 🔒 Insider Trading\n\n*Data unavailable*\n\n"
+
+        # 7. SAST (Substantial Acquisitions)
+        try:
+            sast = self.get_sast(path, page_size=page_size)
+            md += "## 📈 SAST (Substantial Acquisitions)\n\n"
+            if sast:
+                md += "| Date | Acquirer | Type | Qty | Post-Txn Shares |\n"
+                md += "|------|----------|------|-----|----------------|\n"
+                for s in sast:
+                    date = s.date_parsed or s.date or "N/A"
+                    qty = f"{s.quantity:,}" if s.quantity else "N/A"
+                    post = f"{s.shares_post:,}" if s.shares_post else "N/A"
+                    md += f"| {date} | {s.acquirer_name[:30]}{'...' if len(s.acquirer_name) > 30 else ''} | {s.transaction_type} | {qty} | {post} |\n"
+                md += "\n"
+            else:
+                md += "*No SAST transactions found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch SAST: {e}")
+            md += "## 📈 SAST (Substantial Acquisitions)\n\n*Data unavailable*\n\n"
+
+        # 8. Block Deals
+        try:
+            block_deals = self.get_block_deals(path, page_size=page_size)
+            md += "## 💰 Block Deals\n\n"
+            if block_deals:
+                md += "| Date | Client | Type | Qty | Price |\n"
+                md += "|------|--------|------|-----|-------|\n"
+                for d in block_deals:
+                    date = d.date_parsed or d.date or "N/A"
+                    qty = f"{d.quantity:,}" if d.quantity else "N/A"
+                    price = f"₹{d.weighted_avg_price:,.2f}" if d.weighted_avg_price else "N/A"
+                    md += f"| {date} | {d.client_name[:30]}{'...' if len(d.client_name) > 30 else ''} | {d.transaction_type} | {qty} | {price} |\n"
+                md += "\n"
+            else:
+                md += "*No block deals found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch block deals: {e}")
+            md += "## 💰 Block Deals\n\n*Data unavailable*\n\n"
+
+        # 9. Bulk Deals
+        try:
+            bulk_deals = self.get_bulk_deals(path, page_size=page_size)
+            md += "## 📦 Bulk Deals\n\n"
+            if bulk_deals:
+                md += "| Date | Client | Type | Qty | Price |\n"
+                md += "|------|--------|------|-----|-------|\n"
+                for d in bulk_deals:
+                    date = d.date_parsed or d.date or "N/A"
+                    qty = f"{d.quantity:,}" if d.quantity else "N/A"
+                    price = f"₹{d.weighted_avg_price:,.2f}" if d.weighted_avg_price else "N/A"
+                    md += f"| {date} | {d.client_name[:30]}{'...' if len(d.client_name) > 30 else ''} | {d.transaction_type} | {qty} | {price} |\n"
+                md += "\n"
+            else:
+                md += "*No bulk deals found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch bulk deals: {e}")
+            md += "## 📦 Bulk Deals\n\n*Data unavailable*\n\n"
+
+        # 10. Capital History
+        try:
+            history = self.get_capital_history(path, page_size=page_size)
+            md += "## 📜 Capital History\n\n"
+            if history:
+                md += "| Date | Event | Face Value | Change in Shares |\n"
+                md += "|------|-------|------------|------------------|\n"
+                for h in history:
+                    date = h.date or "N/A"
+                    change = f"{h.change_in_shares:,.0f}" if h.change_in_shares else "N/A"
+                    fv = ""
+                    if h.face_value_old and h.face_value_new:
+                        fv = f"{h.face_value_old} → {h.face_value_new}"
+                    elif h.face_value_new:
+                        fv = str(h.face_value_new)
+                    md += f"| {date} | {h.event_type} | {fv} | {change} |\n"
+                md += "\n"
+            else:
+                md += "*No capital history found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch capital history: {e}")
+            md += "## 📜 Capital History\n\n*Data unavailable*\n\n"
+
+        # 11. Tribunal Cases
+        try:
+            cases = self.get_tribunal_cases(isin, page_size=page_size)
+            md += "## ⚖️ Tribunal Cases\n\n"
+            if cases:
+                for c in cases:
+                    date = c.date_parsed or c.date or "N/A"
+                    md += f"### {c.tribunal_name} ({c.tribunal_bench})\n"
+                    md += f"- **Date:** {date}\n"
+                    md += f"- **Case Type:** {c.case_type}\n"
+                    md += f"- **Order Type:** {c.order_type}\n"
+                    md += f"- **Title:** {c.case_title}\n"
+                    if c.link:
+                        md += f"- 📎 [View Document]({c.link})\n"
+                    md += "\n"
+            else:
+                md += "*No tribunal cases found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch tribunal cases: {e}")
+            md += "## ⚖️ Tribunal Cases\n\n*Data unavailable*\n\n"
+
+        # 12. Auditors
+        try:
+            auditors = self.get_auditors(path)
+            md += "## 🔍 Auditors\n\n"
+            if auditors:
+                md += "| Auditor | Appointment Date |\n"
+                md += "|---------|------------------|\n"
+                for a in auditors:
+                    md += f"| {a.auditor_personnel} | {a.appointment_date or 'N/A'} |\n"
+                md += "\n"
+            else:
+                md += "*No auditor information found*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to fetch auditors: {e}")
+            md += "## 🔍 Auditors\n\n*Data unavailable*\n\n"
+
+        # Footer
+        md += "---\n\n"
+        md += f"*Data sourced from Cogencis API via iinvest.cogencis.com*\n"
+
+        return md
+
     def close(self) -> None:
         """Close the client and release resources."""
         self._http.close()

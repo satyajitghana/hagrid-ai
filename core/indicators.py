@@ -251,6 +251,37 @@ class CorrelationIndicators:
         return max(1, min(half_life, 999))
 
 
+def compute_correlation_matrix(data: pd.DataFrame, method: str = 'pearson', period: Optional[str] = None) -> Dict:
+    """
+    Compute correlation matrix for a DataFrame of asset prices.
+    
+    Args:
+        data: DataFrame where columns are asset symbols and rows are timestamps/dates.
+              Values should be prices (Adjusted Close preferred).
+        method: Method of correlation: {'pearson', 'kendall', 'spearman'}
+        period: Optional period to slice data (e.g., '1y', '6mo') - requires DatetimeIndex
+        
+    Returns:
+        Dictionary representing the correlation matrix
+    """
+    if data.empty:
+        return {"error": "Empty data provided"}
+    
+    # Calculate returns (percentage change)
+    # Correlation is typically calculated on returns, not raw prices, to avoid spurious correlation from trends
+    returns = data.pct_change().dropna()
+    
+    if returns.empty:
+        return {"error": "Insufficient data to calculate returns"}
+    
+    # Compute correlation matrix
+    corr_matrix = returns.corr(method=method)
+    
+    # Convert to dictionary for easier consumption by agents (or JSON serialization)
+    # Structure: { "AAPL": {"AAPL": 1.0, "MSFT": 0.85}, "MSFT": {"AAPL": 0.85, "MSFT": 1.0} }
+    return corr_matrix.to_dict()
+
+
 def compute_technical_analysis(ohlcv_df: pd.DataFrame) -> Dict:
     """
     Compute all technical indicators from OHLCV data

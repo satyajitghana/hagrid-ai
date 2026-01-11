@@ -5,13 +5,17 @@ from pydantic import BaseModel, Field
 
 
 class PagingInfo(BaseModel):
-    """Pagination information from API responses."""
+    """Pagination information from API responses.
+    
+    Note: Some API responses return null for pagination fields,
+    so all fields are optional with sensible defaults.
+    """
 
-    total_records: int = Field(alias="totalRecords")
-    page_no: int = Field(alias="pageNo")
-    page_size: int = Field(alias="pageSize")
-    record_count: int = Field(alias="recordCount")
-    no_of_pages: int = Field(alias="noOfPages")
+    total_records: int | None = Field(default=0, alias="totalRecords")
+    page_no: int | None = Field(default=None, alias="pageNo")
+    page_size: int | None = Field(default=None, alias="pageSize")
+    record_count: int | None = Field(default=0, alias="recordCount")
+    no_of_pages: int | None = Field(default=0, alias="noOfPages")
 
     class Config:
         populate_by_name = True

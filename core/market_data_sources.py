@@ -7,11 +7,17 @@ from typing import List, Dict, Any
 from datetime import datetime, timedelta
 import random
 
+# Import real clients
+from tools.cogencis import CogencisClient
+from tools.screener import ScreenerClient
+from tools.tradingview import TradingViewClient
+from tools.yahoo_finance import YFinanceClient
 
 class FIIDIIToolkit(Toolkit):
     """Toolkit for FII/DII institutional flow data"""
     
-    def __init__(self, **kwargs):
+    def __init__(self, cogencis_token: str = "demo_token", **kwargs):
+        self.cogencis = CogencisClient(bearer_token=cogencis_token)
         tools = [
             self.get_fii_dii_data,
             self.get_bulk_deals,
@@ -22,7 +28,7 @@ class FIIDIIToolkit(Toolkit):
     
     def get_fii_dii_data(self, symbol: str, days: int = 5) -> str:
         """
-        Get FII/DII buy/sell data for last N days (Mock data).
+        Get FII/DII buy/sell data for last N days (Mock data as this is usually market-wide).
         
         Args:
             symbol (str): Stock symbol
@@ -31,7 +37,7 @@ class FIIDIIToolkit(Toolkit):
         Returns:
             str: CSV formatted FII/DII flow data
         """
-        # Mock data generation
+        # Mock data generation for now
         lines = ["DATE,FII_BUY_CR,FII_SELL_CR,FII_NET_CR,DII_BUY_CR,DII_SELL_CR,DII_NET_CR"]
         
         for i in range(days):
@@ -47,9 +53,9 @@ class FIIDIIToolkit(Toolkit):
         
         return "\n".join(lines)
     
-    def get_bulk_deals(self, symbol: str, days: int = 10) -> str:
+    def get_bulk_deals(self, symbol: str, days: int = 30) -> str:
         """
-        Get bulk deal data for last N days (Mock data).
+        Get bulk deal data using Cogencis API.
         
         Args:
             symbol (str): Stock symbol
@@ -58,28 +64,35 @@ class FIIDIIToolkit(Toolkit):
         Returns:
             str: CSV formatted bulk deals
         """
-        lines = ["DATE,CLIENT_NAME,DEAL_TYPE,QUANTITY,PRICE"]
-        
-        # Mock: 0-3 bulk deals
-        num_deals = random.randint(0, 3)
-        for i in range(num_deals):
-            date = (datetime.now() - timedelta(days=random.randint(0, days))).strftime("%Y-%m-%d")
-            clients = ["HDFC Mutual Fund", "SBI Mutual Fund", "LIC", "Goldman Sachs", "Morgan Stanley"]
-            client = random.choice(clients)
-            deal_type = random.choice(["BUY", "SELL"])
-            quantity = random.randint(50000, 500000)
-            price = round(random.uniform(1000, 3000), 2)
+        try:
+            # Clean symbol (remove exchange prefix)
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
             
-            lines.append(f"{date},{client},{deal_type},{quantity},{price}")
-        
-        if num_deals == 0:
-            return "NO_BULK_DEALS"
-        
-        return "\n".join(lines)
+            # Lookup symbol to get path
+            matches = self.cogencis.symbol_lookup(clean_symbol)
+            if not matches:
+                return "SYMBOL_NOT_FOUND"
+                
+            path = matches[0].path
+            
+            # Get bulk deals
+            deals = self.cogencis.get_bulk_deals(path, page_size=20)
+            
+            if not deals:
+                return "NO_BULK_DEALS"
+                
+            lines = ["DATE,CLIENT_NAME,DEAL_TYPE,QUANTITY,PRICE"]
+            for deal in deals:
+                lines.append(f"{deal.date_parsed},{deal.client_name},{deal.transaction_type},{deal.quantity},{deal.weighted_avg_price}")
+                
+            return "\n".join(lines)
+            
+        except Exception as e:
+            return f"Error fetching bulk deals: {str(e)}"
     
-    def get_block_deals(self, symbol: str, days: int = 10) -> str:
+    def get_block_deals(self, symbol: str, days: int = 30) -> str:
         """
-        Get block deal data for last N days (Mock data).
+        Get block deal data using Cogencis API.
         
         Args:
             symbol (str): Stock symbol
@@ -88,27 +101,35 @@ class FIIDIIToolkit(Toolkit):
         Returns:
             str: CSV formatted block deals
         """
-        lines = ["DATE,BUYER,SELLER,QUANTITY,PRICE"]
-        
-        # Mock: 0-2 block deals
-        num_deals = random.randint(0, 2)
-        for i in range(num_deals):
-            date = (datetime.now() - timedelta(days=random.randint(0, days))).strftime("%Y-%m-%d")
-            buyer = random.choice(["FII-ABC", "DII-XYZ", "Promoter Group"])
-            seller = random.choice(["FII-DEF", "DII-UVW", "Retail"])
-            quantity = random.randint(100000, 1000000)
-            price = round(random.uniform(1000, 3000), 2)
+        try:
+            # Clean symbol (remove exchange prefix)
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
             
-            lines.append(f"{date},{buyer},{seller},{quantity},{price}")
-        
-        if num_deals == 0:
-            return "NO_BLOCK_DEALS"
-        
-        return "\n".join(lines)
+            # Lookup symbol to get path
+            matches = self.cogencis.symbol_lookup(clean_symbol)
+            if not matches:
+                return "SYMBOL_NOT_FOUND"
+                
+            path = matches[0].path
+            
+            # Get block deals
+            deals = self.cogencis.get_block_deals(path, page_size=20)
+            
+            if not deals:
+                return "NO_BLOCK_DEALS"
+                
+            lines = ["DATE,CLIENT_NAME,DEAL_TYPE,QUANTITY,PRICE"]
+            for deal in deals:
+                lines.append(f"{deal.date_parsed},{deal.client_name},{deal.transaction_type},{deal.quantity},{deal.weighted_avg_price}")
+                
+            return "\n".join(lines)
+            
+        except Exception as e:
+            return f"Error fetching block deals: {str(e)}"
     
     def get_shareholding_pattern(self, symbol: str) -> str:
         """
-        Get latest shareholding pattern (Mock data).
+        Get latest shareholding pattern using Cogencis API.
         
         Args:
             symbol (str): Stock symbol
@@ -116,28 +137,43 @@ class FIIDIIToolkit(Toolkit):
         Returns:
             str: Formatted shareholding data
         """
-        # Mock shareholding pattern
-        promoter = round(random.uniform(40, 75), 2)
-        fii = round(random.uniform(10, 30), 2)
-        dii = round(random.uniform(10, 25), 2)
-        public = round(100 - promoter - fii - dii, 2)
-        
-        promoter_change = round(random.uniform(-2, 2), 2)
-        fii_change = round(random.uniform(-3, 3), 2)
-        dii_change = round(random.uniform(-2, 2), 2)
-        
-        return f"""SHAREHOLDING_PATTERN:
-Promoter: {promoter}% (QoQ Change: {promoter_change:+.2f}%)
-FII: {fii}% (QoQ Change: {fii_change:+.2f}%)
-DII: {dii}% (QoQ Change: {dii_change:+.2f}%)
-Public: {public}%
-Pledged Promoter Shares: {round(random.uniform(0, 20), 2)}%"""
+        try:
+            # Clean symbol (remove exchange prefix)
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
+            
+            # Use Cogencis for shareholding
+            info = self.cogencis.get_company_info(clean_symbol)
+            if not info:
+                return "DATA_NOT_AVAILABLE"
+                
+            # Parse shareholding data
+            shareholders = info.get("shareholders", [])
+            promoters = [s for s in shareholders if s.is_promoter and not s.is_group]
+            
+            promoter_holding = 0.0
+            for p in promoters:
+                holding = p.get_latest_holding()
+                if holding:
+                    promoter_holding += holding.percentage
+                    
+            # This is simplified - real implementation would aggregate categories
+            return f"""SHAREHOLDING_PATTERN:
+Promoter: {promoter_holding:.2f}%
+Public: {100 - promoter_holding:.2f}%
+(Detailed breakdown available via get_key_shareholders)"""
+            
+        except Exception as e:
+            return f"Error fetching shareholding pattern: {str(e)}"
 
 
 class NewsToolkit(Toolkit):
     """Toolkit for news and sentiment data"""
     
-    def __init__(self, **kwargs):
+    def __init__(self, cogencis_token: str = "demo_token", **kwargs):
+        self.cogencis = CogencisClient(bearer_token=cogencis_token)
+        self.tradingview = TradingViewClient()
+        self.yf = YFinanceClient()
+        
         tools = [
             self.get_latest_news,
             self.get_broker_ratings,
@@ -147,7 +183,7 @@ class NewsToolkit(Toolkit):
     
     def get_latest_news(self, symbol: str, hours: int = 24) -> str:
         """
-        Get latest news for stock in last N hours (Mock data).
+        Get latest news for stock in last N hours using multiple sources.
         
         Args:
             symbol (str): Stock symbol
@@ -156,40 +192,47 @@ class NewsToolkit(Toolkit):
         Returns:
             str: Formatted news items
         """
-        # Mock news items
-        news_templates = [
-            ("Positive", "Company announces Q{q} results beating estimates by {pct}%"),
-            ("Positive", "Brokerage upgrades stock to BUY with target of ₹{target}"),
-            ("Negative", "Company misses Q{q} revenue estimates by {pct}%"),
-            ("Neutral", "Management holds analyst meeting to discuss strategy"),
-            ("Positive", "Company wins major ₹{amt} crore contract"),
-            ("Negative", "Regulatory authority issues notice to company"),
-        ]
-        
-        num_news = random.randint(0, 3)
-        lines = ["LATEST_NEWS:"]
-        
-        for i in range(num_news):
-            sentiment, template = random.choice(news_templates)
-            time_ago = random.randint(1, hours)
+        try:
+            # Clean symbol for different APIs
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
+            tv_symbol = symbol.replace("-EQ", "") # NSE:RELIANCE
             
-            news_text = template.format(
-                q=random.choice(["Q1", "Q2", "Q3", "Q4"]),
-                pct=random.randint(5, 25),
-                target=random.randint(1500, 3000),
-                amt=random.randint(100, 5000)
-            )
+            lines = ["LATEST_NEWS:"]
             
-            lines.append(f"{i+1}. [{sentiment}] {news_text} - {time_ago}h ago")
-        
-        if num_news == 0:
-            lines.append("No significant news in last 24 hours")
-        
-        return "\n".join(lines)
+            # 1. TradingView News
+            try:
+                tv_news = self.tradingview.get_latest_news(tv_symbol, count=5)
+                for item in tv_news:
+                    lines.append(f"[TradingView] {item.title} ({item.provider_name}) - {item.published_datetime}")
+            except Exception as e:
+                lines.append(f"Error fetching TV news: {str(e)}")
+                
+            # 2. Cogencis News
+            try:
+                cog_news = self.cogencis.get_news_for_symbol(clean_symbol, page_size=5)
+                for item in cog_news:
+                    lines.append(f"[Cogencis] {item.headline} - {item.source_datetime_parsed}")
+            except Exception as e:
+                lines.append(f"Error fetching Cogencis news: {str(e)}")
+                
+            # 3. Yahoo Finance News (as backup)
+            try:
+                yf_news = self.yf.get_news(f"{clean_symbol}.NS")
+                for item in yf_news[:3]:
+                    title = item.get('title', 'No Title')
+                    pub = item.get('publisher', 'Unknown')
+                    lines.append(f"[Yahoo] {title} ({pub})")
+            except Exception:
+                pass
+            
+            return "\n".join(lines)
+            
+        except Exception as e:
+            return f"Error fetching news: {str(e)}"
     
     def get_broker_ratings(self, symbol: str, days: int = 30) -> str:
         """
-        Get broker ratings/recommendations (Mock data).
+        Get broker ratings/recommendations using Yahoo Finance.
         
         Args:
             symbol (str): Stock symbol
@@ -198,23 +241,31 @@ class NewsToolkit(Toolkit):
         Returns:
             str: Formatted broker ratings
         """
-        upgrades = random.randint(0, 3)
-        downgrades = random.randint(0, 2)
-        maintains = random.randint(1, 5)
-        
-        avg_target = round(random.uniform(1500, 3000), 2)
-        consensus = random.choice(["BUY", "HOLD", "SELL"])
-        
-        return f"""BROKER_RATINGS (Last {days} days):
-Upgrades: {upgrades}
-Downgrades: {downgrades}
-Maintains: {maintains}
-Consensus: {consensus}
-Average Target: ₹{avg_target}"""
+        try:
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "") + ".NS"
+            analysis = self.yf.get_analysis(clean_symbol)
+            
+            summary = analysis.recommendations_summary
+            if not summary:
+                return "NO_BROKER_RATINGS_AVAILABLE"
+                
+            # Format the latest summary
+            latest = summary[0] if summary else {}
+            
+            return f"""BROKER_RATINGS:
+Strong Buy: {latest.get('strongBuy', 0)}
+Buy: {latest.get('buy', 0)}
+Hold: {latest.get('hold', 0)}
+Sell: {latest.get('sell', 0)}
+Strong Sell: {latest.get('strongSell', 0)}
+Period: {latest.get('period', 'Unknown')}"""
+            
+        except Exception as e:
+            return f"Error fetching broker ratings: {str(e)}"
     
     def get_social_sentiment(self, symbol: str) -> str:
         """
-        Get social media sentiment (Mock data).
+        Get social media sentiment (Mock data for now).
         
         Args:
             symbol (str): Stock symbol
@@ -236,6 +287,9 @@ class FundamentalsToolkit(Toolkit):
     """Toolkit for fundamental data"""
     
     def __init__(self, **kwargs):
+        self.screener = ScreenerClient()
+        self.yf = YFinanceClient()
+        
         tools = [
             self.get_financial_ratios,
             self.get_quarterly_results,
@@ -245,7 +299,7 @@ class FundamentalsToolkit(Toolkit):
     
     def get_financial_ratios(self, symbol: str) -> str:
         """
-        Get key financial ratios (Mock data).
+        Get key financial ratios using Screener and Yahoo Finance.
         
         Args:
             symbol (str): Stock symbol
@@ -253,50 +307,72 @@ class FundamentalsToolkit(Toolkit):
         Returns:
             str: Formatted financial ratios
         """
-        pe = round(random.uniform(15, 40), 2)
-        pb = round(random.uniform(2, 8), 2)
-        roe = round(random.uniform(10, 25), 2)
-        roce = round(random.uniform(12, 28), 2)
-        debt_equity = round(random.uniform(0.1, 1.5), 2)
-        current_ratio = round(random.uniform(1.0, 2.5), 2)
-        
-        return f"""FINANCIAL_RATIOS:
+        try:
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
+            
+            # Try Screener first (better for Indian stocks)
+            company = self.screener.search_first(clean_symbol)
+            if company and company.id:
+                # Get valuation chart to extract current PE
+                val_chart = self.screener.get_valuation_chart(company.id)
+                margin_chart = self.screener.get_margin_chart(company.id)
+                
+                pe = val_chart.pe_ratio.latest_value or "N/A"
+                opm = margin_chart.opm.latest_value or "N/A"
+                npm = margin_chart.npm.latest_value or "N/A"
+                
+                return f"""FINANCIAL_RATIOS (Screener):
 PE Ratio: {pe}
-PB Ratio: {pb}
-ROE: {roe}%
-ROCE: {roce}%
-Debt-to-Equity: {debt_equity}
-Current Ratio: {current_ratio}
-Interest Coverage: {round(random.uniform(3, 15), 2)}x"""
+OPM: {opm}%
+NPM: {npm}%
+(More details available via get_quarterly_results)"""
+            
+            # Fallback to Yahoo Finance
+            info = self.yf.get_ticker_info(f"{clean_symbol}.NS").info
+            
+            return f"""FINANCIAL_RATIOS (Yahoo):
+PE Ratio: {info.get('trailingPE', 'N/A')}
+PB Ratio: {info.get('priceToBook', 'N/A')}
+ROE: {info.get('returnOnEquity', 'N/A')}
+Debt-to-Equity: {info.get('debtToEquity', 'N/A')}
+Current Ratio: {info.get('currentRatio', 'N/A')}"""
+            
+        except Exception as e:
+            return f"Error fetching ratios: {str(e)}"
     
     def get_quarterly_results(self, symbol: str, quarters: int = 4) -> str:
         """
-        Get quarterly results for last N quarters (Mock data).
+        Get quarterly results using Screener markdown.
         
         Args:
             symbol (str): Stock symbol
-            quarters (int): Number of quarters
+            quarters (int): Number of quarters (ignored, returns full table)
             
         Returns:
-            str: CSV formatted quarterly data
+            str: Quarterly results table in markdown
         """
-        lines = ["QUARTER,REVENUE_CR,NET_PROFIT_CR,EPS,YOY_GROWTH%"]
-        
-        base_revenue = random.uniform(5000, 20000)
-        for i in range(quarters):
-            quarter = f"Q{4-i}FY25" if i < 4 else f"Q{8-i}FY24"
-            revenue = round(base_revenue * (1 + random.uniform(-0.1, 0.15)), 2)
-            profit = round(revenue * random.uniform(0.10, 0.25), 2)
-            eps = round(profit / 100, 2)  # Mock EPS
-            yoy_growth = round(random.uniform(-5, 25), 2)
+        try:
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
             
-            lines.append(f"{quarter},{revenue},{profit},{eps},{yoy_growth}")
-        
-        return "\n".join(lines)
+            # Screener provides a nice markdown table
+            markdown = self.screener.get_company_page(clean_symbol)
+            
+            # Extract just the Quarterly Results section
+            if "## Quarterly Results" in markdown:
+                # Simple extraction logic
+                parts = markdown.split("## Quarterly Results")
+                if len(parts) > 1:
+                    section = parts[1].split("##")[0]
+                    return "QUARTERLY_RESULTS:" + section
+            
+            return markdown[:2000] # Return truncated page if parsing fails
+            
+        except Exception as e:
+            return f"Error fetching quarterly results: {str(e)}"
     
     def get_peer_comparison(self, symbol: str, sector: str) -> str:
         """
-        Get peer comparison data (Mock data).
+        Get peer comparison data (Mock data for now).
         
         Args:
             symbol (str): Stock symbol
@@ -318,7 +394,10 @@ Interest Coverage: {round(random.uniform(3, 15), 2)}x"""
 class EventsToolkit(Toolkit):
     """Toolkit for corporate events calendar"""
     
-    def __init__(self, **kwargs):
+    def __init__(self, cogencis_token: str = "demo_token", **kwargs):
+        self.cogencis = CogencisClient(bearer_token=cogencis_token)
+        self.yf = YFinanceClient()
+        
         tools = [
             self.get_earnings_calendar,
             self.get_dividend_calendar,
@@ -326,9 +405,9 @@ class EventsToolkit(Toolkit):
         ]
         super().__init__(name="events_toolkit", tools=tools, **kwargs)
     
-    def get_earnings_calendar(self, symbol: str, days_ahead: int = 5) -> str:
+    def get_earnings_calendar(self, symbol: str, days_ahead: int = 30) -> str:
         """
-        Get upcoming earnings announcements (Mock data).
+        Get upcoming earnings announcements using Yahoo Finance.
         
         Args:
             symbol (str): Stock symbol
@@ -337,24 +416,29 @@ class EventsToolkit(Toolkit):
         Returns:
             str: Formatted earnings calendar
         """
-        # Mock: 30% chance of earnings in next 5 days
-        if random.random() < 0.3:
-            days_until = random.randint(1, days_ahead)
-            date = (datetime.now() + timedelta(days=days_until)).strftime("%Y-%m-%d")
-            quarter = random.choice(["Q1FY25", "Q2FY25", "Q3FY25", "Q4FY25"])
-            consensus_eps = round(random.uniform(15, 50), 2)
+        try:
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "") + ".NS"
+            calendar = self.yf.get_calendar(clean_symbol)
             
-            return f"""EARNINGS_ANNOUNCEMENT:
-Date: {date} ({days_until} days)
-Quarter: {quarter}
-Consensus EPS: ₹{consensus_eps}
-Market Expectation: {'BEAT' if random.random() > 0.5 else 'INLINE'}"""
-        else:
-            return "NO_EARNINGS_ANNOUNCEMENT_SCHEDULED"
+            if not calendar.earnings_dates:
+                return "NO_EARNINGS_ANNOUNCEMENT_SCHEDULED"
+                
+            # Filter for future dates
+            future_earnings = []
+            for item in calendar.earnings_dates:
+                # Yahoo often returns dates as keys in the dict list
+                # Implementation depends on exact YF response structure
+                # This is a simplified view
+                future_earnings.append(str(item))
+                
+            return f"EARNINGS_CALENDAR: {future_earnings[:2]}"
+            
+        except Exception as e:
+            return f"Error fetching earnings: {str(e)}"
     
     def get_dividend_calendar(self, symbol: str) -> str:
         """
-        Get dividend information (Mock data).
+        Get dividend information using Cogencis.
         
         Args:
             symbol (str): Stock symbol
@@ -362,23 +446,31 @@ Market Expectation: {'BEAT' if random.random() > 0.5 else 'INLINE'}"""
         Returns:
             str: Formatted dividend info
         """
-        # Mock: 40% chance of dividend event
-        if random.random() < 0.4:
-            dividend_per_share = round(random.uniform(5, 20), 2)
-            ex_date = (datetime.now() + timedelta(days=random.randint(1, 15))).strftime("%Y-%m-%d")
-            record_date = (datetime.now() + timedelta(days=random.randint(2, 16))).strftime("%Y-%m-%d")
+        try:
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
             
-            return f"""DIVIDEND_INFO:
-Dividend Per Share: ₹{dividend_per_share}
-Ex-Dividend Date: {ex_date}
-Record Date: {record_date}
-Dividend Yield: {round(random.uniform(1, 4), 2)}%"""
-        else:
-            return "NO_UPCOMING_DIVIDEND"
+            matches = self.cogencis.symbol_lookup(clean_symbol)
+            if not matches:
+                return "SYMBOL_NOT_FOUND"
+                
+            actions = self.cogencis.get_corporate_actions(matches[0].path)
+            dividends = [a for a in actions if a.is_dividend]
+            
+            if not dividends:
+                return "NO_UPCOMING_DIVIDEND"
+                
+            lines = ["DIVIDEND_INFO:"]
+            for div in dividends[:3]:
+                lines.append(f"Dividend: ₹{div.dividend_amount} (Ex-Date: {div.ex_date_parsed})")
+                
+            return "\n".join(lines)
+            
+        except Exception as e:
+            return f"Error fetching dividends: {str(e)}"
     
     def get_corporate_actions(self, symbol: str, days_ahead: int = 30) -> str:
         """
-        Get corporate actions (splits, bonus, buyback) (Mock data).
+        Get corporate actions (splits, bonus, buyback) using Cogencis.
         
         Args:
             symbol (str): Stock symbol
@@ -387,24 +479,58 @@ Dividend Yield: {round(random.uniform(1, 4), 2)}%"""
         Returns:
             str: Formatted corporate actions
         """
-        actions = []
-        
-        # Mock: Random corporate actions
-        if random.random() < 0.2:  # 20% chance of some action
-            action_type = random.choice(["BONUS", "SPLIT", "BUYBACK", "RIGHTS"])
-            date = (datetime.now() + timedelta(days=random.randint(1, days_ahead))).strftime("%Y-%m-%d")
+        try:
+            clean_symbol = symbol.split(":")[-1].replace("-EQ", "")
             
-            if action_type == "BONUS":
-                actions.append(f"BONUS: 1:1 Bonus shares - Record Date: {date}")
-            elif action_type == "SPLIT":
-                actions.append(f"SPLIT: Stock split 1:2 - Effective Date: {date}")
-            elif action_type == "BUYBACK":
-                price = round(random.uniform(1500, 3000), 2)
-                actions.append(f"BUYBACK: At ₹{price} per share - Open until: {date}")
-            elif action_type == "RIGHTS":
-                actions.append(f"RIGHTS: Rights issue 1:5 at ₹{round(random.uniform(100, 500), 2)} - Record Date: {date}")
+            matches = self.cogencis.symbol_lookup(clean_symbol)
+            if not matches:
+                return "SYMBOL_NOT_FOUND"
+                
+            actions = self.cogencis.get_corporate_actions(matches[0].path)
+            
+            # Filter non-dividends
+            corp_actions = [a for a in actions if not a.is_dividend]
+            
+            if not corp_actions:
+                return "NO_CORPORATE_ACTIONS_SCHEDULED"
+                
+            lines = ["CORPORATE_ACTIONS:"]
+            for act in corp_actions[:3]:
+                lines.append(f"{act.purpose} (Ex-Date: {act.ex_date_parsed})")
+                
+            return "\n".join(lines)
+            
+        except Exception as e:
+            return f"Error fetching corporate actions: {str(e)}"
+
+
+class MacroToolkit(Toolkit):
+    """Toolkit for global macro data"""
+    
+    def __init__(self, **kwargs):
+        self.yf = YFinanceClient()
+        tools = [
+            self.get_global_market_status
+        ]
+        super().__init__(name="macro_toolkit", tools=tools, **kwargs)
         
-        if not actions:
-            return "NO_CORPORATE_ACTIONS_SCHEDULED"
+    def get_global_market_status(self) -> str:
+        """
+        Get status of global indices (US, Europe, Asia).
         
-        return "CORPORATE_ACTIONS:\n" + "\n".join(actions)
+        Returns:
+            str: Global market summary
+        """
+        try:
+            indexes = self.yf.get_global_indexes()
+            
+            lines = ["GLOBAL_MARKETS:"]
+            for idx in indexes:
+                change_str = f"{idx.change_percent:+.2f}%" if idx.change_percent is not None else "N/A"
+                price_str = f"{idx.last_price:.2f}" if idx.last_price is not None else "N/A"
+                lines.append(f"{idx.name} ({idx.country}): {price_str} ({change_str})")
+                
+            return "\n".join(lines)
+            
+        except Exception as e:
+            return f"Error fetching global markets: {str(e)}"

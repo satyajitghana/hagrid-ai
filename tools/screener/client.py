@@ -113,6 +113,19 @@ class ScreenerClient:
     # ==========================================================================
     # Chart API
     # ==========================================================================
+    #
+    # Chart API availability:
+    #   ✅ WORKS WITHOUT AUTH:
+    #      - Price charts (Price, DMA50, DMA200, Volume)
+    #      - get_price_chart()
+    #
+    #   ⚠️ MAY REQUIRE AUTH (returns 404):
+    #      - Valuation charts (PE, EPS, Market Cap/Sales)
+    #      - Margin charts (GPM, OPM, NPM)
+    #      - get_valuation_chart(), get_market_cap_chart(), get_margin_chart()
+    #
+    # Alternative: Use get_company_page() which contains all data in HTML.
+    # ==========================================================================
 
     def get_chart(
         self,
@@ -124,6 +137,9 @@ class ScreenerClient:
         """
         Get chart data for a company.
 
+        Note: Some chart queries work without authentication (Price charts),
+        while others (Valuation, Margin) may require a logged-in session.
+
         Args:
             company_id: Company ID from search results
             query: Chart query string (metrics to fetch)
@@ -133,13 +149,9 @@ class ScreenerClient:
         Returns:
             ChartResponse with datasets
 
-        Example:
-            >>> chart = client.get_chart(
-            ...     company_id=2726,
-            ...     query="Price-DMA50-DMA200-Volume",
-            ...     days=365
-            ... )
-            >>> print(f"Latest price: {chart.price.latest_value}")
+        Raises:
+            ScreenerNotFoundError: If chart type requires auth
+            ScreenerValidationError: If company_id is missing
         """
         if not company_id:
             raise ScreenerValidationError("company_id is required")
@@ -162,8 +174,10 @@ class ScreenerClient:
         """
         Get price chart with moving averages and volume.
 
+        ✅ WORKS WITHOUT AUTHENTICATION
+
         Args:
-            company_id: Company ID
+            company_id: Company ID from search results
             days: Number of days (default: 365)
             consolidated: Use consolidated data
 
@@ -171,9 +185,9 @@ class ScreenerClient:
             ChartResponse with Price, DMA50, DMA200, Volume datasets
 
         Example:
-            >>> chart = client.get_price_chart(2726, days=365)
-            >>> price = chart.price
-            >>> print(f"Latest: ₹{price.latest_value} on {price.latest_date}")
+            >>> results = client.search("reliance")
+            >>> chart = client.get_price_chart(results.first.id)
+            >>> print(f"Latest: ₹{chart.price.latest_value}")
         """
         return self.get_chart(
             company_id=company_id,
@@ -191,6 +205,9 @@ class ScreenerClient:
         """
         Get PE ratio and EPS chart.
 
+        ⚠️ MAY REQUIRE AUTHENTICATION - Returns 404 without login.
+        Alternative: Use get_company_page() for full data.
+
         Args:
             company_id: Company ID
             days: Number of days (default: 10000 for max history)
@@ -198,11 +215,6 @@ class ScreenerClient:
 
         Returns:
             ChartResponse with PE, Median PE, EPS datasets
-
-        Example:
-            >>> chart = client.get_valuation_chart(2726)
-            >>> pe = chart.pe_ratio
-            >>> print(f"Current PE: {pe.latest_value}")
         """
         return self.get_chart(
             company_id=company_id,
@@ -220,6 +232,9 @@ class ScreenerClient:
         """
         Get profit margin chart (GPM, OPM, NPM).
 
+        ⚠️ MAY REQUIRE AUTHENTICATION - Returns 404 without login.
+        Alternative: Use get_company_page() for full data.
+
         Args:
             company_id: Company ID
             days: Number of days (default: 10000 for max history)
@@ -227,11 +242,6 @@ class ScreenerClient:
 
         Returns:
             ChartResponse with GPM, OPM, NPM, Quarter Sales datasets
-
-        Example:
-            >>> chart = client.get_margin_chart(2726)
-            >>> opm = chart.opm
-            >>> print(f"Latest OPM: {opm.latest_value}%")
         """
         return self.get_chart(
             company_id=company_id,
@@ -248,6 +258,9 @@ class ScreenerClient:
     ) -> ChartResponse:
         """
         Get market cap to sales ratio chart.
+
+        ⚠️ MAY REQUIRE AUTHENTICATION - Returns 404 without login.
+        Alternative: Use get_company_page() for full data.
 
         Args:
             company_id: Company ID
@@ -460,9 +473,10 @@ class ScreenerClient:
         price_days: int = 365,
     ) -> str:
         """
-        Get a comprehensive markdown report for a company.
+        Get a comprehensive markdown report for a company by search query.
 
-        Includes name, description, charts (Price, PE, Margins), and fundamentals.
+        Note: Chart API may require authentication and often fails.
+        Use get_report_markdown() with a CompanySearchResult for reliability.
 
         Args:
             query: Company name or symbol
@@ -482,39 +496,118 @@ class ScreenerClient:
         md += f"**Screener ID:** {company.id}\n"
         md += f"**URL:** https://www.screener.in{company.url}\n\n"
 
-        # 2. Charts Summary
+        # 2. Charts Summary (often fails due to auth)
         if charts:
             md += "## Market & Financial Data (Latest)\n\n"
             
             # Price
             price_chart = charts.get('price')
-            if price_chart and price_chart.price.latest_value:
+            if price_chart and price_chart.price and price_chart.price.latest_value:
                 md += f"**Current Price:** ₹{price_chart.price.latest_value} ({price_chart.price.latest_date})\n"
-                if price_chart.dma50.latest_value:
+                if price_chart.dma50 and price_chart.dma50.latest_value:
                     md += f"**50 DMA:** ₹{price_chart.dma50.latest_value}\n"
-                if price_chart.dma200.latest_value:
+                if price_chart.dma200 and price_chart.dma200.latest_value:
                     md += f"**200 DMA:** ₹{price_chart.dma200.latest_value}\n"
             
             # Valuation
             val_chart = charts.get('valuation')
             if val_chart:
-                if val_chart.pe_ratio.latest_value:
+                if val_chart.pe_ratio and val_chart.pe_ratio.latest_value:
                     md += f"**PE Ratio:** {val_chart.pe_ratio.latest_value}\n"
-                if val_chart.eps.latest_value:
+                if val_chart.eps and val_chart.eps.latest_value:
                     md += f"**EPS (TTM):** ₹{val_chart.eps.latest_value}\n"
             
             # Margins
             margin_chart = charts.get('margin')
             if margin_chart:
-                 if margin_chart.opm.latest_value:
+                 if margin_chart.opm and margin_chart.opm.latest_value:
                      md += f"**OPM:** {margin_chart.opm.latest_value}%\n"
-                 if margin_chart.npm.latest_value:
+                 if margin_chart.npm and margin_chart.npm.latest_value:
                      md += f"**NPM:** {margin_chart.npm.latest_value}%\n"
 
             md += "\n"
 
         # 3. Fundamentals Page
         md += "## Fundamentals Analysis\n\n"
+        md += fundamentals
+
+        return md
+
+    def get_report_markdown(
+        self,
+        company: CompanySearchResult,
+    ) -> str:
+        """
+        Get markdown report for a company from search result.
+
+        This is the recommended method as it:
+        - Avoids extra search API call
+        - Uses the URL directly from search result
+        - Doesn't rely on chart API (which requires auth)
+
+        Args:
+            company: CompanySearchResult from search()
+
+        Returns:
+            Markdown formatted string with company fundamentals
+
+        Example:
+            >>> results = client.search("reliance")
+            >>> company = results.first
+            >>> markdown = client.get_report_markdown(company)
+            >>> print(markdown[:500])
+        """
+        if not company:
+            raise ScreenerValidationError("company cannot be None")
+
+        # Fetch the fundamentals page
+        fundamentals = self._http.get_markdown(company.url)
+
+        md = f"# {company.name}\n\n"
+        md += f"**Symbol:** {company.symbol}\n"
+        md += f"**Screener ID:** {company.id}\n"
+        md += f"**URL:** https://www.screener.in{company.url}\n"
+        md += f"**Consolidated:** {'Yes' if company.is_consolidated else 'No'}\n\n"
+        md += "---\n\n"
+        md += fundamentals
+
+        return md
+
+    def get_report_by_symbol(
+        self,
+        symbol: str,
+        consolidated: bool = True,
+    ) -> str:
+        """
+        Get markdown report for a company by stock symbol.
+
+        Directly fetches the company page without searching.
+
+        Args:
+            symbol: Stock symbol (e.g., "RELIANCE", "TCS", "INFY")
+            consolidated: Use consolidated view (default: True)
+
+        Returns:
+            Markdown formatted string
+
+        Example:
+            >>> markdown = client.get_report_by_symbol("RELIANCE")
+            >>> print(markdown[:500])
+        """
+        if not symbol:
+            raise ScreenerValidationError("symbol cannot be empty")
+
+        # Build path
+        path = f"/company/{symbol.upper()}/"
+        if consolidated:
+            path = f"/company/{symbol.upper()}/consolidated/"
+
+        fundamentals = self._http.get_markdown(path)
+
+        md = f"# {symbol.upper()}\n\n"
+        md += f"**URL:** https://www.screener.in{path}\n"
+        md += f"**Consolidated:** {'Yes' if consolidated else 'No'}\n\n"
+        md += "---\n\n"
         md += fundamentals
 
         return md

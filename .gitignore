@@ -10,3 +10,5 @@ wheels/
 .venv
 
 fyers_token.json
+
+.env
