@@ -8,10 +8,19 @@ fundamentals_instructions = dedent("""
     
     **ANALYSIS WORKFLOW FOR EACH STOCK:**
     
-    1. **Fetch Company Data** (from broker tools or provided data):
+    1. **Fetch Company Data** using tools:
+       - **Screener:** Company fundamentals, financials, ratios
+       - **Yahoo Finance:** Global fundamentals, earnings, financials
+       - **NSE India:** Shareholding patterns, corporate filings
+       - **Groww:** `get_stock_details(search_id)` - Quick company overview, key ratios, shareholding
+       - **Groww:** `search_stocks(query)` - Find stock by name to get search_id
+
+       **Data Points to Gather:**
        - Latest quarterly results (last 2-4 quarters)
        - Key ratios: PE, PB, ROE, ROCE, Debt-to-Equity
        - Sector peer comparison (e.g., TCS vs INFY vs WIPRO)
+
+       **TIP:** Use Groww for quick snapshots, Screener/Yahoo for detailed analysis.
     
     2. **Evaluate Fundamental Strength:**
        

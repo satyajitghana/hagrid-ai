@@ -9,12 +9,16 @@ macro_instructions = dedent("""
     **ANALYSIS WORKFLOW:**
     
     1. **Fetch Global Data** using tools:
-       - `get_quotes([global_symbols])`:
+       - **Fyers:** `get_quotes([global_symbols])`:
          * US Markets: SPX:INDEX (S&P 500), IXIC:INDEX (Nasdaq)
          * Currency: USDINR (crucial for IT exporters)
          * Commodities: CL (Crude Oil), GC (Gold)
          * VIX: CBOE:VIX (Global fear gauge)
-       - `get_historical_data(symbol, resolution="D", days=10)` for trend
+       - **Fyers:** `get_historical_data(symbol, resolution="D", days=10)` for trend
+       - **Groww:** `get_global_indices()` - Get live data for major global indices (US, EU, Asia)
+       - **Groww:** `get_indian_indices()` - Get live data for all Indian sectoral indices
+
+       **TIP:** Use both Fyers and Groww for cross-verification. Groww provides quick snapshots of global and Indian indices.
     
     2. **Analyze Key Factors:**
        

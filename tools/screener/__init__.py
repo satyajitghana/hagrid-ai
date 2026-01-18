@@ -30,6 +30,7 @@ Example:
 """
 
 from .client import ScreenerClient
+from .toolkit import ScreenerToolkit
 from .core.exceptions import (
     ScreenerError,
     ScreenerAPIError,
@@ -57,6 +58,8 @@ __version__ = "0.1.0"
 __all__ = [
     # Main client
     "ScreenerClient",
+    # Toolkit for agents
+    "ScreenerToolkit",
     # Exceptions
     "ScreenerError",
     "ScreenerAPIError",

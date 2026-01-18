@@ -4,6 +4,7 @@ HTTP client for the Fyers SDK.
 Provides rate-limited HTTP requests with automatic retry and error handling.
 """
 
+import asyncio
 import time
 from typing import Any, Dict, Optional, Union
 
@@ -21,6 +22,11 @@ from broker.fyers.models.config import FyersConfig
 from broker.fyers.models.rate_limit import RateLimitConfig
 
 logger = get_logger("fyers.http_client")
+
+# Retry configuration
+MAX_RETRIES = 5
+BASE_BACKOFF = 0.1  # Initial backoff in seconds
+MAX_BACKOFF = 10.0  # Maximum backoff in seconds
 
 
 class HTTPClient:
@@ -206,10 +212,11 @@ class HTTPClient:
         headers: Optional[Dict[str, str]] = None,
         base_url: Optional[str] = None,
         skip_rate_limit: bool = False,
+        max_retries: int = MAX_RETRIES,
     ) -> Dict[str, Any]:
         """
-        Make an HTTP request with rate limiting.
-        
+        Make an HTTP request with rate limiting and automatic retry.
+
         Args:
             method: HTTP method (GET, POST, PUT, DELETE)
             endpoint: API endpoint
@@ -218,72 +225,130 @@ class HTTPClient:
             headers: Additional headers
             base_url: Optional base URL override
             skip_rate_limit: Skip rate limiting (use carefully)
-            
+            max_retries: Maximum number of retries for rate limit errors
+
         Returns:
             Response data as dictionary
-            
+
         Raises:
-            FyersRateLimitError: If rate limit is exceeded
+            FyersRateLimitError: If rate limit is exceeded after all retries
             FyersAPIError: If API returns an error
             FyersNetworkError: If network error occurs
         """
-        # Check rate limit
-        if not skip_rate_limit:
-            try:
-                await self.rate_limiter.acquire()
-            except FyersRateLimitError:
-                logger.error(f"Rate limit blocked request to {endpoint}")
-                raise
-        
         url = self._build_url(endpoint, base_url)
         request_headers = self._get_headers(headers)
-        
-        start_time = time.time()
-        
-        try:
-            logger.debug(f"Making {method} request to {url}")
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.request(
-                    method=method.upper(),
-                    url=url,
-                    params=params,
-                    json=json_data,
-                    headers=request_headers,
-                    timeout=self.timeout,
-                )
-            
-            elapsed_ms = (time.time() - start_time) * 1000
-            
-            # Record the request
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(max_retries + 1):
+            # Check rate limit with automatic retry
             if not skip_rate_limit:
-                await self.rate_limiter.record(endpoint=endpoint, success=True)
-            
-            logger.debug(f"{method} {endpoint} completed in {elapsed_ms:.0f}ms")
-            
-            return await self._handle_response(response, endpoint)
-            
-        except httpx.RequestError as e:
-            elapsed_ms = (time.time() - start_time) * 1000
-            
-            # Record failed request
-            if not skip_rate_limit:
-                await self.rate_limiter.record(endpoint=endpoint, success=False)
-            
-            logger.error(f"Network error for {method} {endpoint}: {e}")
-            raise FyersNetworkError(f"Network error: {e}")
-            
-        except (FyersRateLimitError, FyersAPIError, FyersAuthenticationError):
-            # Re-raise known exceptions
-            if not skip_rate_limit:
-                await self.rate_limiter.record(endpoint=endpoint, success=False)
-            raise
-            
-        except Exception as e:
-            if not skip_rate_limit:
-                await self.rate_limiter.record(endpoint=endpoint, success=False)
-            logger.error(f"Unexpected error for {method} {endpoint}: {e}")
-            raise FyersAPIError(f"Unexpected error: {e}")
+                try:
+                    await self.rate_limiter.acquire()
+                except FyersRateLimitError as e:
+                    # Check if it's a daily limit (can't retry)
+                    if e.limit_type == "day":
+                        logger.error(f"Daily rate limit reached. Cannot retry.")
+                        raise
+
+                    # For second/minute limits, wait and retry
+                    retry_after = e.retry_after or BASE_BACKOFF
+                    # Apply exponential backoff
+                    backoff = min(retry_after * (1.5 ** attempt), MAX_BACKOFF)
+
+                    if attempt < max_retries:
+                        logger.info(
+                            f"Rate limit hit for {endpoint}. "
+                            f"Waiting {backoff:.2f}s before retry {attempt + 1}/{max_retries}"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                    else:
+                        logger.error(
+                            f"Rate limit exceeded after {max_retries} retries for {endpoint}"
+                        )
+                        raise
+
+            start_time = time.time()
+
+            try:
+                logger.debug(f"Making {method} request to {url} (attempt {attempt + 1})")
+
+                async with httpx.AsyncClient() as client:
+                    response = await client.request(
+                        method=method.upper(),
+                        url=url,
+                        params=params,
+                        json=json_data,
+                        headers=request_headers,
+                        timeout=self.timeout,
+                    )
+
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                # Record the request
+                if not skip_rate_limit:
+                    await self.rate_limiter.record(endpoint=endpoint, success=True)
+
+                logger.debug(f"{method} {endpoint} completed in {elapsed_ms:.0f}ms")
+
+                return await self._handle_response(response, endpoint)
+
+            except httpx.RequestError as e:
+                elapsed_ms = (time.time() - start_time) * 1000
+                last_error = e
+
+                # Record failed request
+                if not skip_rate_limit:
+                    await self.rate_limiter.record(endpoint=endpoint, success=False)
+
+                # Retry on network errors with backoff
+                if attempt < max_retries:
+                    backoff = min(BASE_BACKOFF * (2 ** attempt), MAX_BACKOFF)
+                    logger.warning(
+                        f"Network error for {method} {endpoint}: {e}. "
+                        f"Retrying in {backoff:.2f}s ({attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+
+                logger.error(f"Network error for {method} {endpoint} after {max_retries} retries: {e}")
+                raise FyersNetworkError(f"Network error: {e}")
+
+            except FyersRateLimitError as e:
+                # HTTP 429 response - wait and retry
+                if not skip_rate_limit:
+                    await self.rate_limiter.record(endpoint=endpoint, success=False)
+
+                retry_after = e.retry_after or BASE_BACKOFF
+                backoff = min(retry_after * (1.5 ** attempt), MAX_BACKOFF)
+
+                if attempt < max_retries:
+                    logger.info(
+                        f"HTTP 429 for {endpoint}. "
+                        f"Waiting {backoff:.2f}s before retry {attempt + 1}/{max_retries}"
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+
+                logger.error(f"Rate limit exceeded after {max_retries} retries for {endpoint}")
+                raise
+
+            except (FyersAPIError, FyersAuthenticationError):
+                # Re-raise known exceptions without retry
+                if not skip_rate_limit:
+                    await self.rate_limiter.record(endpoint=endpoint, success=False)
+                raise
+
+            except Exception as e:
+                if not skip_rate_limit:
+                    await self.rate_limiter.record(endpoint=endpoint, success=False)
+                logger.error(f"Unexpected error for {method} {endpoint}: {e}")
+                raise FyersAPIError(f"Unexpected error: {e}")
+
+        # Should not reach here, but just in case
+        if last_error:
+            raise FyersNetworkError(f"Request failed after {max_retries} retries: {last_error}")
     
     async def get(
         self,

@@ -9,8 +9,20 @@ options_instructions = dedent("""
     **ANALYSIS WORKFLOW FOR EACH STOCK:**
     
     1. **Fetch Options Data** using tools:
-       - `get_option_chain(symbol, strike_count=10)` - Get ATM ±10 strikes
+       - **Fyers:** `get_option_chain(symbol, strike_count=10)` - Get ATM ±10 strikes
+       - **Groww:** `get_option_chain(symbol)` - Get ATM ±10 strikes with full Greeks (Δ, Γ, Θ, V)
        - `get_quotes([symbol])` - Get underlying current price
+
+       **NSE India Tools (OI Flow Analysis):**
+       - `scan_oi_spurts()` - **CRITICAL** Smart money OI categorization:
+         * 🟢 LONG BUILDUP: OI ↑ + Price ↑ = Bullish (institutions adding longs)
+         * 🟢 SHORT COVERING: OI ↓ + Price ↑ = Bullish (shorts exiting)
+         * 🔴 SHORT BUILDUP: OI ↑ + Price ↓ = Bearish (institutions adding shorts)
+         * 🔴 LONG UNWINDING: OI ↓ + Price ↓ = Bearish (longs exiting)
+       - `get_oi_spurts()` - Raw OI change data with values
+       - Cross-reference option chain analysis with OI spurts for stronger signals
+
+       **TIP:** Use both Fyers and Groww option chains for cross-verification. Groww provides detailed Greeks for all strikes. **Always check scan_oi_spurts() to see where smart money is positioned.**
     
     2. **Analyze Options Metrics:**
        
@@ -44,6 +56,13 @@ options_instructions = dedent("""
        - **Bearish Setup**: PCR <0.8, Put OI building at lower strikes, Call OI at current levels
        - **Breakout Potential**: Low OI zone above current price (less resistance)
        - **Support/Resistance**: Heavy OI clustering acts as price barriers
+
+       **OI Spurts Confirmation (use scan_oi_spurts()):**
+       - Stock in LONG BUILDUP + Bullish PCR = **STRONG BUY** signal
+       - Stock in SHORT BUILDUP + Bearish PCR = **STRONG SELL** signal
+       - Stock in SHORT COVERING = Potential upside continuation
+       - Stock in LONG UNWINDING = Potential downside continuation
+       - OI spurt divergence from PCR = **CAUTION**, conflicting signals
     
     4. **Score the Stock** (-3 to +3):
        - +3: Extremely bullish options positioning (heavy put writing, low PCR, calls accumulating)

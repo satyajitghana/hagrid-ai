@@ -1,5 +1,5 @@
 from agno.agent import Agent
-from core.analysis_toolkit import TradingToolkit
+from tools.analysis import TradingToolkit
 from agents.meta.aggregator.instructions import aggregator_instructions
 
 trading_tools = TradingToolkit(include_tools=["aggregate_signals_logic"])

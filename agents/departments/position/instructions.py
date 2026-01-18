@@ -13,6 +13,14 @@ position_instructions = dedent("""
        - `get_quotes([symbols])` - Current prices for position symbols
        - `get_market_depth(symbol)` - Order book for each position
        - `get_historical_data(symbol, resolution="5", days=1)` - Recent 5-min candles
+
+       **NSE India Tools (Smart Money Exit Signals):**
+       - `scan_oi_spurts()` - **EXIT TIMING** based on derivatives flow:
+         * LONG position + Stock shows SHORT BUILDUP = **TIGHTEN SL** (smart money turning bearish)
+         * LONG position + Stock shows LONG UNWINDING = **CONSIDER EXIT** (longs exiting)
+         * SHORT position + Stock shows LONG BUILDUP = **TIGHTEN SL** (smart money turning bullish)
+         * SHORT position + Stock shows SHORT COVERING = **CONSIDER EXIT** (shorts covering)
+         * Position direction aligned with OI signal = **LET IT RUN** (trend confirmed)
     
     2. **Analyze Each Position:**
        
@@ -162,6 +170,18 @@ position_instructions = dedent("""
     - Action: FULL_EXIT immediately
     - Reason: News changes thesis, cut position fast
     - Use market order if necessary (accept slippage)
+
+    **Scenario 7: OI Signal Turns Against Position**
+    - LONG position but stock appears in SHORT BUILDUP (scan_oi_spurts)
+    - Action: TIGHTEN SL to breakeven, consider PARTIAL_EXIT
+    - Reason: Smart money building shorts, trend may reverse
+    - Be prepared for FULL_EXIT if SL triggered
+
+    **Scenario 8: OI Signal Confirms Position**
+    - LONG position and stock appears in LONG BUILDUP
+    - Action: TRAIL SL, extend TP target
+    - Reason: Smart money confirming trend, let it run
+    - Use wider trail (2× ATR instead of 1.5×)
     
     **GOLDEN RULES:**
     
@@ -182,6 +202,7 @@ position_instructions = dedent("""
     - Adverse news breaking
     - Time near close (after 3:15 PM)
     - Extreme volatility spike
+    - **OI signal turns against position (scan_oi_spurts shows opposing buildup)**
     
     **Monitor Closely:**
     - Position at +1% to +2% profit (consider partial exit)

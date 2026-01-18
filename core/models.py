@@ -32,6 +32,26 @@ class NewsItem(SQLModel, table=True):
     timestamp: str = Field(index=True)
     fetched_at: str
 
+
+class Trade(SQLModel, table=True):
+    """Individual trade records for tracking executed trades"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: str = Field(index=True)  # YYYY-MM-DD
+    symbol: str = Field(index=True)
+    direction: str  # LONG or SHORT
+    entry_price: float
+    exit_price: Optional[float] = None
+    quantity: int
+    entry_time: str
+    exit_time: Optional[str] = None
+    stop_loss: float
+    take_profit: float
+    realized_pnl: Optional[float] = None
+    status: str = Field(default="OPEN", index=True)  # OPEN, CLOSED, STOPPED_OUT
+    order_id: Optional[str] = None
+    sl_order_id: Optional[str] = None
+    exit_reason: Optional[str] = None  # TAKE_PROFIT, STOP_LOSS, MANUAL, TRAILING_STOP
+
 # Database engine and session management
 sqlite_url = "sqlite:///hagrid_ai.db"
 engine = create_engine(sqlite_url, echo=False)

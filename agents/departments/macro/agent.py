@@ -1,29 +1,28 @@
 from agno.agent import Agent
-from core.broker_toolkit import BrokerToolkit
-from broker.fyers_broker import FyersBroker
-from core.config import get_settings
-from core.market_data_sources import MacroToolkit
+from broker.fyers import FyersToolkit
+from core.fyers_client import get_fyers_client
+from tools.public_market_data import PublicMarketDataToolkit
+from tools.yahoo_finance import YahooFinanceToolkit
+from tools.groww import GrowwToolkit
 from agents.departments.macro.instructions import macro_instructions
 
-settings = get_settings()
-
-# Initialize broker and toolkit
-broker = FyersBroker(
-    client_id=settings.FYERS_CLIENT_ID,
-    secret_key=settings.FYERS_SECRET_KEY,
-    token_file=settings.FYERS_TOKEN_FILE
-)
-broker_tools = BrokerToolkit(
-    broker,
+# Initialize toolkits - macro agent needs quotes, historical data, and macro data
+fyers_tools = FyersToolkit(
+    get_fyers_client(),
     include_tools=["get_quotes", "get_historical_data"]
 )
-macro_tools = MacroToolkit()
+# PublicMarketData provides FII/DII data, market holidays, etc.
+public_data_tools = PublicMarketDataToolkit()
+# YahooFinance provides global markets, commodities, forex
+yahoo_tools = YahooFinanceToolkit()
+# Groww provides global indices, Indian indices
+groww_tools = GrowwToolkit()
 
 macro_agent = Agent(
     name="Macro Analyst",
     role="Global Macro Expert",
     model="google:gemini-3-pro-preview",
-    tools=[broker_tools, macro_tools],
+    tools=[fyers_tools, public_data_tools, yahoo_tools, groww_tools],
     instructions=macro_instructions,
     markdown=True,
 )

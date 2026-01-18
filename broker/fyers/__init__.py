@@ -59,7 +59,10 @@ Environment Variables:
     ```
 """
 
+from typing import Optional, Union
+
 from broker.fyers.client import FyersClient, create_client, create_client_async, create_client_from_env
+from broker.fyers.toolkit import FyersToolkit, FyersCache
 from broker.fyers.auth.oauth import FyersOAuth, interactive_login
 from broker.fyers.auth.token_storage import (
     TokenStorage,
@@ -169,6 +172,10 @@ __all__ = [
     "create_client",
     "create_client_async",
     "create_client_from_env",
+
+    # Toolkit for agents
+    "FyersToolkit",
+    "FyersCache",
     
     # Authentication
     "FyersOAuth",
@@ -277,6 +284,68 @@ __all__ = [
     "TBTDepthLevel",
     "TBTConfig",
     "TBTSubscriptionMode",
+
+    # Paper Trading
+    "PaperTradeFyersClient",
+    "get_fyers_client",
 ]
 
 __version__ = "0.1.0"
+
+
+# Lazy import for paper trading to avoid circular imports
+def get_fyers_client(
+    config: Optional[FyersConfig] = None,
+    auto_authenticate: bool = False,
+) -> Union[FyersClient, "PaperTradeFyersClient"]:
+    """
+    Factory function that returns appropriate client based on PAPER_TRADE setting.
+
+    If PAPER_TRADE=True in settings, returns PaperTradeFyersClient which simulates
+    all trading operations locally. Otherwise returns the standard FyersClient.
+
+    Args:
+        config: Optional FyersConfig. If not provided, creates from environment.
+        auto_authenticate: Whether to auto-authenticate on creation.
+
+    Returns:
+        FyersClient or PaperTradeFyersClient based on settings.
+
+    Example:
+        ```python
+        from broker.fyers import get_fyers_client
+
+        # Automatically picks the right client based on PAPER_TRADE setting
+        client = get_fyers_client()
+        await client.authenticate()
+
+        # Works the same regardless of paper/live mode
+        response = await client.place_order({...})
+        positions = await client.get_positions()
+        ```
+    """
+    from core.config import get_settings
+
+    settings = get_settings()
+
+    if config is None:
+        config = FyersConfig.from_env(token_file=settings.FYERS_TOKEN_FILE)
+
+    if settings.PAPER_TRADE:
+        from broker.fyers.paper_trade import PaperTradeFyersClient
+
+        return PaperTradeFyersClient(
+            config=config,
+            state_file=settings.PAPER_TRADE_STATE_FILE,
+            initial_balance=settings.PAPER_TRADE_INITIAL_BALANCE,
+        )
+    else:
+        return FyersClient(config)
+
+
+# Lazy import for type hints
+def __getattr__(name: str):
+    if name == "PaperTradeFyersClient":
+        from broker.fyers.paper_trade import PaperTradeFyersClient
+        return PaperTradeFyersClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -75,6 +75,10 @@ from broker.fyers.auth.token_storage import (
     MemoryTokenStorage,
     TokenManager,
 )
+from broker.fyers.utils.greeks import (
+    compute_option_chain_greeks,
+    DEFAULT_RISK_FREE_RATE,
+)
 
 logger = get_logger("fyers.client")
 
@@ -875,7 +879,92 @@ class FyersClient:
         )
         
         return OptionChainResponse(**response)
-    
+
+    async def get_option_greeks(
+        self,
+        symbol: str,
+        strike_count: int = 10,
+        risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get option chain with computed Greeks (IV, Delta, Gamma, Theta, Vega, Rho).
+
+        Uses Black-Scholes model for European-style options.
+
+        Args:
+            symbol: Underlying symbol (e.g., "NSE:NIFTY50-INDEX", "NSE:SBIN-EQ")
+            strike_count: Number of strikes to return (max 50)
+            risk_free_rate: Annual risk-free rate (decimal, default ~6.5% for India)
+
+        Returns:
+            List of dictionaries with option data and computed Greeks:
+            - symbol, strike, option_type, expiry_epoch
+            - time_to_expiry_years, time_to_expiry_days
+            - spot, ltp, iv (percentage)
+            - delta, gamma, theta (per day), vega (per 1%), rho (per 1%)
+            - oi, volume, bid, ask
+
+        Example:
+            ```python
+            greeks = await client.get_option_greeks("NSE:NIFTY50-INDEX", strike_count=5)
+            for opt in greeks:
+                print(f"{opt['symbol']}: IV={opt['iv']}%, Delta={opt['delta']}")
+            ```
+        """
+        self._ensure_authenticated()
+
+        # Get option chain
+        option_chain = await self.get_option_chain(symbol, strike_count=strike_count)
+
+        # Get spot price
+        quotes = await self.get_quotes([symbol])
+        spot_price = None
+
+        if quotes.d:
+            for quote in quotes.d:
+                # quote.v is a dict, not a pydantic model
+                if quote.v and quote.v.get('lp'):
+                    spot_price = quote.v.get('lp')
+                    break
+
+        if spot_price is None:
+            raise FyersException(f"Could not get spot price for {symbol}")
+
+        # Extract nearest expiry from expiryData (options don't have expiry field)
+        nearest_expiry = None
+        if option_chain.data:
+            expiry_data = option_chain.data.get('expiryData', [])
+            if expiry_data:
+                # First entry is the nearest expiry
+                nearest_expiry = expiry_data[0].get('expiry')
+
+        # Prepare option chain data for Greeks computation
+        options_data = []
+        # Use helper method since option_chain.data is a dict
+        for opt in option_chain.get_options_chain():
+            # Skip underlying (no option_type)
+            if not opt.get("option_type"):
+                continue
+
+            options_data.append({
+                "symbol": opt.get("symbol"),
+                "strike_price": opt.get("strike_price"),
+                "option_type": opt.get("option_type"),
+                "expiry": nearest_expiry,  # Use extracted expiry
+                "ltp": opt.get("ltp"),
+                "bid": opt.get("bid"),
+                "ask": opt.get("ask"),
+                "oi": opt.get("oi"),
+                "volume": opt.get("volume"),
+            })
+
+        # Compute Greeks
+        return compute_option_chain_greeks(
+            options_data,
+            spot_price,
+            risk_free_rate=risk_free_rate,
+        )
+
     # ==================== Order APIs ====================
     
     async def place_order(self, order_data: Dict[str, Any]) -> OrderPlacementResponse:
@@ -1126,22 +1215,6 @@ class FyersClient:
         )
         return OrdersResponse(**response)
     
-    async def get_order_by_id_filtered(self, order_id: str) -> OrdersResponse:
-        """
-        Get order details by order ID using query param.
-        
-        Args:
-            order_id: Order ID to fetch
-            
-        Returns:
-            Order details
-        """
-        self._ensure_authenticated()
-        response = await self._http_client.get(
-            "/orders",
-            params={"id": order_id}
-        )
-        return OrdersResponse(**response)
     
     # ==================== Multi-Leg Orders ====================
     

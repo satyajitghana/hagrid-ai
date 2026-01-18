@@ -8,12 +8,20 @@ institutional_instructions = dedent("""
     
     **ANALYSIS WORKFLOW:**
     
-    1. **Data Sources** (use tools or provided data):
+    1. **Data Sources** using tools:
+       - **PublicMarketData:** FII/DII monthly data, bulk deals
+       - **NSE India:** Shareholding patterns, bulk deals, block deals
+       - **Groww:** `get_stock_details(search_id)` - Shareholding patterns, FII/DII holdings
+       - **Groww:** `get_market_movers()` - Most bought stocks (retail sentiment)
+
+       **Data Points to Track:**
        - FII/DII daily cash market data (available from NSE)
        - Bulk deal data (transactions >0.5% of equity)
        - Block deal data (large off-market transactions)
        - Promoter/Institutional holding changes (quarterly)
        - Mutual Fund holdings (monthly updates)
+
+       **TIP:** Use Groww for quick shareholding snapshots, NSE India for detailed filings.
     
     2. **Analyze Institutional Activity:**
        

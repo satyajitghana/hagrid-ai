@@ -9,10 +9,25 @@ technical_instructions = dedent("""
     **ANALYSIS WORKFLOW FOR EACH STOCK:**
     
     1. **Fetch Data** using tools:
-       - `get_historical_data(symbol, resolution="D", days=200)` - Get 200 days of daily data
-       - `get_historical_data(symbol, resolution="15", days=5)` - Get 5 days of 15-min data
-       - `get_quotes([symbol])` - Get current price and volume
-       - `get_market_depth(symbol)` - Get order book
+       - **Fyers:** `get_historical_data(symbol, resolution="D", days=200)` - Get 200 days daily data
+       - **Fyers:** `get_historical_data(symbol, resolution="15", days=5)` - Get 5 days 15-min data
+       - **Fyers:** `get_quotes([symbol])` - Get current price and volume
+       - **Fyers:** `get_market_depth(symbol)` - Get order book
+       - **Groww:** `get_stock_price(symbol)` - Live OHLC with 52-week range
+       - **Groww:** `search_stocks(query)` - Find stock symbols
+
+       **NSE India (OI Confirmation & Sector Data):**
+       - `scan_oi_spurts()` - **BREAKOUT CONFIRMATION** via derivatives flow:
+         * 🟢 LONG BUILDUP: OI ↑ + Price ↑ = Confirms bullish breakout
+         * 🟢 SHORT COVERING: OI ↓ + Price ↑ = Short squeeze potential
+         * 🔴 SHORT BUILDUP: OI ↑ + Price ↓ = Confirms bearish breakdown
+         * 🔴 LONG UNWINDING: OI ↓ + Price ↓ = Confirms selling pressure
+       - `fetch_sector_constituents(sector)` - Get all stocks in a sector
+         * Useful for sector rotation analysis
+         * Examples: "banking", "it", "pharma", "auto", "metal"
+       - `get_index_constituents(index)` - Stocks in any NSE index with 52W data
+
+       **TIP:** Use Groww for quick price checks and 52W positioning. Use Fyers for historical data and technical analysis. **Use scan_oi_spurts() to confirm breakouts/breakdowns with derivatives activity.**
     
     2. **Calculate Key Indicators** (use the data):
        - Moving Averages: SMA(20, 50, 200), EMA(12, 26)
@@ -70,12 +85,21 @@ technical_instructions = dedent("""
     - Ensure 1% target is achievable based on ATR
     - Never recommend if RSI shows divergence against trend
     - Check for support/resistance zones
-    
+    - **Check scan_oi_spurts() for OI confirmation on breakout/breakdown setups**
+
+    **OI CONFIRMATION BOOST:**
+    - Breakout + Long Buildup = **+1 to score** (smart money confirming)
+    - Breakdown + Short Buildup = **+1 to score magnitude** (bears confirming)
+    - Breakout but Short Buildup = **CAUTION** (divergence, may fail)
+    - Breakdown but Long Buildup = **CAUTION** (may reverse)
+
     **REJECT IF:**
     - Low volume (below 50% of average)
     - Choppy price action (conflicting indicators)
     - Inside tight consolidation
     - ATR suggests <1% intraday range unlikely
-    
+    - **Technical breakout with contradicting OI signal (Short Buildup on bullish breakout)**
+
     Use `calculate_sma_signal` tool after your analysis to validate your findings.
+    Use `scan_oi_spurts()` to confirm breakout setups with derivatives activity.
 """)

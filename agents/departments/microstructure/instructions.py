@@ -7,11 +7,21 @@ microstructure_instructions = dedent("""
     Analyze the order book, bid-ask spreads, and trading volume to assess liquidity conditions and provide execution guidance for NIFTY 100 stocks. Your analysis helps the Execution Agent place orders efficiently.
     
     **ANALYSIS WORKFLOW:**
-    
+
     1. **Fetch Real-Time Data** using tools:
        - `get_market_depth(symbol)` - Order book with 5 levels of bids/asks
        - `get_quotes([symbol])` - Current LTP, volume, bid-ask spread
        - `get_historical_data(symbol, resolution="1", days=1)` - Intraday 1-min candles
+
+       **NSE India Tools (Smart Money Flow):**
+       - `scan_oi_spurts()` - **CRITICAL** Categorized OI analysis showing:
+         * 🟢 LONG BUILDUP: OI ↑ + Price ↑ = Bullish (smart money buying)
+         * 🟢 SHORT COVERING: OI ↓ + Price ↑ = Bullish (shorts closing)
+         * 🔴 SHORT BUILDUP: OI ↑ + Price ↓ = Bearish (smart money shorting)
+         * 🔴 LONG UNWINDING: OI ↓ + Price ↓ = Bearish (longs exiting)
+         * Use this to confirm order flow direction with derivatives activity
+       - `get_oi_spurts()` - Raw OI change data for detailed analysis
+       - `get_most_active()` - Most traded stocks by value (institutional interest)
     
     2. **Analyze Order Book:**
        
@@ -195,6 +205,14 @@ microstructure_instructions = dedent("""
     - **Large Orders**: Break into smaller chunks (iceberg orders)
     - **Volatile Periods**: Avoid market orders, use limits
     
+    **OI FLOW CONFIRMATION:**
+    Use `scan_oi_spurts()` to cross-check order book signals with derivatives flow:
+    - Order book shows buying pressure + OI Long Buildup = **STRONG CONFIRMATION**
+    - Order book shows selling + OI Short Buildup = **STRONG CONFIRMATION**
+    - Order book vs OI divergence = **CAUTION** (may be temporary noise)
+    - Stock in Long Buildup list = favor long entries, tighter stops
+    - Stock in Short Buildup list = favor short entries or avoid longs
+
     **REMEMBER:**
     - You provide real-time execution intelligence
     - Your analysis helps Execution Agent minimize slippage
@@ -203,4 +221,5 @@ microstructure_instructions = dedent("""
     - Best execution saves money on every trade
     - Illiquid stocks require extra caution
     - Your score reflects SHORT-TERM (minutes) order flow, not long-term direction
+    - **Use scan_oi_spurts() to validate order flow with derivatives activity**
 """)

@@ -1,14 +1,16 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
-from workflows.intraday_cycle import intraday_workflow
 from core.config import get_settings
 from core.models import DailyPick, NewsItem, create_db_and_tables, get_session
-from broker.mock_broker import MockBroker
+from core.fyers_client import get_fyers_client, ensure_authenticated
 from typing import Optional, Annotated
 from datetime import datetime, date, timedelta
 import asyncio
 import json
+
+# Import API routes
+from api.routes import trades_router, workflows_router
 
 settings = get_settings()
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -16,7 +18,8 @@ SessionDep = Annotated[Session, Depends(get_session)]
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.VERSION,
-    debug=settings.DEBUG
+    debug=settings.DEBUG,
+    description="Hagrid AI Trading Backend - Multi-Agent Trading System"
 )
 
 # CORS Middleware
@@ -28,8 +31,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize broker (mock for MVP)
-broker = MockBroker()
+# Include API routes
+app.include_router(trades_router)
+app.include_router(workflows_router)
+
+# Get Fyers client (lazy initialization, authentication on first use)
+def get_broker():
+    """Get FyersClient instance for API endpoints."""
+    return get_fyers_client()
 
 @app.on_event("startup")
 def on_startup():
@@ -48,50 +57,7 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 # === CORE TRADING ENDPOINTS ===
-
-@app.post("/run-cycle")
-async def trigger_cycle(symbols: Optional[list[str]] = None, session: SessionDep = None):
-    """
-    Trigger the daily stock analysis cycle.
-    Analyzes all NIFTY 100 stocks and selects top 10-15 picks.
-    """
-    if symbols is None:
-        symbols = ["NSE:INFY-EQ", "NSE:TCS-EQ", "NSE:RELIANCE-EQ"]  # Will be NIFTY 100
-    
-    prompt = f"Analyze these symbols for intraday trading: {', '.join(symbols)}. Current market VIX: 18.0"
-    result = intraday_workflow.run(prompt)
-    
-    # Store daily picks in SQLite using SQLModel
-    today = date.today().isoformat()
-    picks_data = {
-        "date": today,
-        "picks": result.content,
-        "symbols": symbols,
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    # Check if pick exists for today
-    statement = select(DailyPick).where(DailyPick.date == today)
-    existing_pick = session.exec(statement).first()
-    
-    if existing_pick:
-        existing_pick.picks_json = json.dumps(picks_data)
-        existing_pick.timestamp = datetime.now().isoformat()
-    else:
-        db_pick = DailyPick(
-            date=today,
-            picks_json=json.dumps(picks_data),
-            timestamp=datetime.now().isoformat()
-        )
-        session.add(db_pick)
-    
-    session.commit()
-    
-    return {
-        "status": "completed",
-        "date": today,
-        "result": result.content
-    }
+# Note: /run-cycle removed - use scheduler or /api/workflows endpoints instead
 
 @app.get("/staging")
 async def get_staging(date_str: Optional[str] = None, session: SessionDep = None):
@@ -118,22 +84,23 @@ async def get_marketwatch():
     """
     Get real-time market watch directly from broker.
     """
+    broker = get_broker()
     symbols = ["NSE:INFY-EQ", "NSE:TCS-EQ", "NSE:RELIANCE-EQ", "NSE:SBIN-EQ", "NSE:HDFCBANK-EQ"]
     quotes_result = await broker.get_quotes(symbols)
-    
+
     watchlist = []
-    for quote in quotes_result.get("d", []):
-        v = quote.get("v", {})
-        watchlist.append({
-            "symbol": quote.get("n"),
-            "ltp": v.get("lp"),
-            "change": v.get("ch"),
-            "change_pct": v.get("chp"),
-            "volume": v.get("volume"),
-            "high": v.get("high_price"),
-            "low": v.get("low_price")
-        })
-    
+    if quotes_result.quotes:
+        for quote in quotes_result.quotes:
+            watchlist.append({
+                "symbol": quote.symbol,
+                "ltp": quote.ltp,
+                "change": quote.change,
+                "change_pct": quote.change_percent,
+                "volume": quote.volume,
+                "high": quote.high,
+                "low": quote.low
+            })
+
     return {
         "timestamp": datetime.now().isoformat(),
         "symbols": watchlist
@@ -142,30 +109,37 @@ async def get_marketwatch():
 @app.get("/positions")
 async def get_positions():
     """Get current positions directly from broker"""
+    broker = get_broker()
     positions_result = await broker.get_positions()
+    positions_list = [p.model_dump() for p in positions_result.net_positions] if positions_result.net_positions else []
     return {
         "timestamp": datetime.now().isoformat(),
-        "positions": positions_result.get("netPositions", []),
-        "count": len(positions_result.get("netPositions", []))
+        "positions": positions_list,
+        "count": len(positions_list)
     }
 
 @app.get("/funds")
 async def get_funds():
     """Get account funds directly from broker"""
+    broker = get_broker()
+    funds_result = await broker.get_funds()
     return {
-        "available_balance": 100000.00,
-        "used_margin": 15000.00,
-        "total_equity": 115000.00,
-        "pnl_today": 5000.00,
+        "available_balance": funds_result.available_margin or 0,
+        "used_margin": funds_result.used_margin or 0,
+        "total_equity": funds_result.total_balance or 0,
+        "pnl_today": funds_result.realized_profit or 0,
         "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/orders")
 async def get_orders():
     """Get order book directly from broker"""
+    broker = get_broker()
+    orders_result = await broker.get_orders()
+    orders_list = [o.model_dump() for o in orders_result.orders] if orders_result.orders else []
     return {
-        "orders": list(broker.orders.values()),
-        "count": len(broker.orders),
+        "orders": orders_list,
+        "count": len(orders_list),
         "timestamp": datetime.now().isoformat()
     }
 
@@ -275,15 +249,17 @@ async def websocket_analysis(websocket: WebSocket):
 async def websocket_updates(websocket: WebSocket):
     """WebSocket for real-time market updates from broker"""
     await websocket.accept()
+    broker = get_broker()
     try:
         while True:
             await asyncio.sleep(5)
             quotes = await broker.get_quotes(["NSE:NIFTY50-INDEX"])
-            
+            quotes_data = [q.model_dump() for q in quotes.quotes] if quotes.quotes else []
+
             await websocket.send_json({
                 "type": "market_update",
                 "timestamp": datetime.now().isoformat(),
-                "data": quotes
+                "data": quotes_data
             })
     except WebSocketDisconnect:
         print("Client disconnected from updates")
@@ -293,13 +269,17 @@ async def websocket_updates(websocket: WebSocket):
 @app.post("/analysis/stock")
 async def analyze_stock(symbol: str):
     """Run comprehensive analysis on a specific stock"""
+    broker = get_broker()
     quotes = await broker.get_quotes([symbol])
     market_depth = await broker.get_market_depth(symbol)
-    
+
+    quote_data = quotes.quotes[0].model_dump() if quotes.quotes else {}
+    depth_data = market_depth.model_dump() if market_depth else {}
+
     return {
         "symbol": symbol,
-        "market_data": quotes,
-        "depth": market_depth,
+        "market_data": quote_data,
+        "depth": depth_data,
         "recommendation": "BUY",
         "confidence": 0.85,
         "target": 1560.00,
@@ -333,12 +313,14 @@ async def get_technical_indicators(symbol: str, resolution: str = "D", days: int
     """
     from core.indicators import compute_technical_analysis
     import pandas as pd
-    
+
+    broker = get_broker()
+
     # Fetch historical data
     from datetime import datetime, timedelta
     range_to = datetime.now().strftime("%Y-%m-%d")
     range_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    
+
     result = await broker.get_history(
         symbol=symbol,
         resolution=resolution,
@@ -346,20 +328,30 @@ async def get_technical_indicators(symbol: str, resolution: str = "D", days: int
         range_from=range_from,
         range_to=range_to
     )
-    
-    candles = result.get("candles", [])
+
+    candles = result.candles if result and result.candles else []
     if not candles:
         return {"error": "No historical data available", "symbol": symbol}
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    
+
+    # Convert to DataFrame - FyersClient returns candle objects
+    df = pd.DataFrame([
+        {
+            'timestamp': c.timestamp,
+            'open': c.open,
+            'high': c.high,
+            'low': c.low,
+            'close': c.close,
+            'volume': c.volume
+        }
+        for c in candles
+    ])
+
     # Compute all indicators
     indicators = compute_technical_analysis(df)
     indicators['symbol'] = symbol
     indicators['resolution'] = resolution
     indicators['timestamp'] = datetime.now().isoformat()
-    
+
     return indicators
 
 @app.get("/indicators/options/{symbol}")
@@ -369,29 +361,41 @@ async def get_options_metrics(symbol: str, strike_count: int = 10):
     Returns analysis only - NO raw option chain.
     """
     from core.indicators import OptionsIndicators
-    
+
+    broker = get_broker()
+
     # Fetch option chain and current price
     option_result = await broker.get_option_chain(symbol, strike_count)
     quote_result = await broker.get_quotes([symbol])
-    
-    option_chain = option_result.get("data", {}).get("optionsChain", [])
-    current_price = quote_result.get("d", [{}])[0].get("v", {}).get("lp", 0)
-    
+
+    # Convert option chain to list of dicts for compatibility
+    option_chain = []
+    if option_result and option_result.options_chain:
+        for opt in option_result.options_chain:
+            option_chain.append({
+                'strike_price': opt.strike_price,
+                'option_type': opt.option_type,
+                'oi': opt.open_interest or 0,
+                'ltp': opt.ltp or 0
+            })
+
+    current_price = quote_result.quotes[0].ltp if quote_result.quotes else 0
+
     if not option_chain:
         return {"error": "No options data available", "symbol": symbol}
-    
+
     # Calculate metrics
     total_put_oi = sum(opt['oi'] for opt in option_chain if opt['option_type'] == 'PE')
     total_call_oi = sum(opt['oi'] for opt in option_chain if opt['option_type'] == 'CE')
     pcr = OptionsIndicators.pcr(total_put_oi, total_call_oi)
     max_pain = OptionsIndicators.max_pain(option_chain)
-    
+
     # Find max OI strikes
     calls = [opt for opt in option_chain if opt['option_type'] == 'CE']
     puts = [opt for opt in option_chain if opt['option_type'] == 'PE']
     max_call_oi = max(calls, key=lambda x: x['oi']) if calls else {}
     max_put_oi = max(puts, key=lambda x: x['oi']) if puts else {}
-    
+
     return {
         "symbol": symbol,
         "current_price": current_price,
@@ -414,37 +418,39 @@ async def get_correlation_metrics(symbol1: str, symbol2: str, days: int = 100):
     """
     from core.indicators import CorrelationIndicators
     import pandas as pd
-    
+
+    broker = get_broker()
+
     # Fetch historical data for both symbols
     from datetime import datetime, timedelta
     range_to = datetime.now().strftime("%Y-%m-%d")
     range_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    
+
     result1 = await broker.get_history(symbol1, "D", 1, range_from, range_to)
     result2 = await broker.get_history(symbol2, "D", 1, range_from, range_to)
-    
-    candles1 = result1.get("candles", [])
-    candles2 = result2.get("candles", [])
-    
+
+    candles1 = result1.candles if result1 and result1.candles else []
+    candles2 = result2.candles if result2 and result2.candles else []
+
     if not candles1 or not candles2:
         return {"error": "Insufficient data for correlation analysis"}
-    
-    # Extract close prices
-    prices1 = pd.Series([c[4] for c in candles1])
-    prices2 = pd.Series([c[4] for c in candles2])
-    
+
+    # Extract close prices from candle objects
+    prices1 = pd.Series([c.close for c in candles1])
+    prices2 = pd.Series([c.close for c in candles2])
+
     # Calculate metrics
     corr_30 = CorrelationIndicators.correlation(prices1, prices2, 30)
     corr_60 = CorrelationIndicators.correlation(prices1, prices2, 60)
-    
+
     returns1 = prices1.pct_change().dropna()
     returns2 = prices2.pct_change().dropna()
     beta = CorrelationIndicators.beta(returns1, returns2)
-    
+
     spread = prices1 - (beta * prices2)
     z_score = CorrelationIndicators.z_score(spread)
     half_life = CorrelationIndicators.half_life(spread)
-    
+
     return {
         "symbol1": symbol1,
         "symbol2": symbol2,

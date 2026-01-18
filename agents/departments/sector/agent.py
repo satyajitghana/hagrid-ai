@@ -1,27 +1,25 @@
 from agno.agent import Agent
-from core.broker_toolkit import BrokerToolkit
-from broker.fyers_broker import FyersBroker
-from core.config import get_settings
+from broker.fyers import FyersToolkit
+from core.fyers_client import get_fyers_client
+from tools.groww import GrowwToolkit
+from tools.nse_india import NSEIndiaToolkit
 from agents.departments.sector.instructions import sector_instructions
 
-settings = get_settings()
-
-# Initialize broker and toolkit
-broker = FyersBroker(
-    client_id=settings.FYERS_CLIENT_ID,
-    secret_key=settings.FYERS_SECRET_KEY,
-    token_file=settings.FYERS_TOKEN_FILE
-)
-broker_tools = BrokerToolkit(
-    broker,
+# Initialize toolkits - sector agent needs comprehensive sector data
+fyers_tools = FyersToolkit(
+    get_fyers_client(),
     include_tools=["get_quotes", "get_historical_data"]
 )
+# Groww provides market movers, Indian indices (sectoral)
+groww_tools = GrowwToolkit()
+# NSE India provides comprehensive index data, constituents, market movers
+nse_tools = NSEIndiaToolkit()
 
 sector_agent = Agent(
     name="Sector Analyst",
     role="Sector Rotation Specialist",
     model="google:gemini-3-pro-preview",
-    tools=[broker_tools],
+    tools=[fyers_tools, groww_tools, nse_tools],
     instructions=sector_instructions,
     markdown=True,
 )

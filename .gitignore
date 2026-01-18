@@ -12,3 +12,11 @@ wheels/
 fyers_token.json
 
 .env
+
+.cache
+
+*.db
+
+.hagrid
+
+tools/nse_india/all_api_responses

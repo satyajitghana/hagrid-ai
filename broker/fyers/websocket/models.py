@@ -15,9 +15,12 @@ from pydantic import BaseModel, Field
 
 
 # ==================== Enums ====================
+# NOTE: These enums are specific to WebSocket protocol and may have different
+# values than REST API enums in models/enums.py. The WebSocket binary protocol
+# uses its own encoding scheme. Do not consolidate with models/enums.py.
 
 class OrderStatus(IntEnum):
-    """Order status codes from Fyers."""
+    """Order status codes from Fyers WebSocket."""
     CANCELLED = 1
     TRADED = 2
     # 3 is not used currently
@@ -34,7 +37,7 @@ class OrderSide(IntEnum):
 
 
 class Segment(IntEnum):
-    """Exchange segment codes."""
+    """Exchange segment codes for WebSocket protocol."""
     EQUITY = 10       # E (Equity)
     FNO = 11          # D (F&O)
     CURRENCY = 12     # C (Currency)
@@ -42,7 +45,7 @@ class Segment(IntEnum):
 
 
 class Exchange(IntEnum):
-    """Exchange codes."""
+    """Exchange codes for WebSocket protocol."""
     NSE = 10
     BSE = 20
     MCX = 30
